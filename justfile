@@ -10,35 +10,30 @@ install:
     mise exec -- bun ci
 
 typecheck:
-    @echo "typecheck 尚未配置：仓库目前没有 TypeScript 源码" >&2
-    @exit 1
+    mise exec -- bun run tsc --noEmit
 
 test SCOPE *ARGS:
-    @echo "test 尚未配置：仓库目前没有应用测试" >&2
-    @exit 1
+    #!/usr/bin/env bash
+    set -euo pipefail
+    scope="$1"
+    shift
+    case "$scope" in
+        core)
+            if [[ $# -gt 0 && "$1" != -* ]]; then
+                exec mise exec -- bun test "$@"
+            fi
+            exec mise exec -- bun test ./tests/core "$@"
+            ;;
+        *) echo "未知测试 scope: $scope" >&2; exit 2 ;;
+    esac
 
 gate-plan:
     @echo '{"core":"gate-core","full":["gate-core"],"defer_to_final":[]}'
 
 gate-core:
     just check-toolchain
+    just typecheck
     mise exec -- bun run biome ci
-
-gate-artifact:
-    @echo "gate-artifact 尚未配置：仓库目前没有构建产物" >&2
-    @exit 1
-
-gate-database:
-    @echo "gate-database 尚未配置：仓库目前没有数据库代码" >&2
-    @exit 1
-
-gate-browser:
-    @echo "gate-browser 尚未配置：仓库目前没有浏览器代码" >&2
-    @exit 1
-
-gate-system:
-    @echo "gate-system 尚未配置：仓库目前没有系统集成代码" >&2
-    @exit 1
 
 gate-full:
     just gate-core
