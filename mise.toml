@@ -1,0 +1,3 @@
+# Bun 的兼容版本 line；精确构建由 mise.lock 记录。
+[tools]
+bun = "1.4"

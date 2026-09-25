@@ -1,0 +1,11 @@
+{
+  "name": "grok-media-saver",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "preinstall": "bun scripts/assert-bun-runtime.mjs"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14"
+  }
+}
