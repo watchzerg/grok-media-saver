@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "grok_media_saver",
+  "project_id": "4a7a7479-62ed-4c44-8604-0969871cca9f"
+}
