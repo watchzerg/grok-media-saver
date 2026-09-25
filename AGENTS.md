@@ -9,6 +9,14 @@
 - 当设计会明显增加复杂度时，说明它解决的具体当前问题及更简单的替代方案。如果没有直接收益，选择更简单的方案。
 - 只有在合理的不同理解会实质改变范围、产品行为或风险时，才请求确认。
 
+## 文档入口
+
+- 了解项目当前状态时，读取 [README.md](README.md)。
+- 涉及领域行为、数据模型或命名时，读取已存在的 `CONTEXT.md`；设计或修改架构时，读取已存在的 `ARCHITECTURE.md` 和相关 ADR。
+- 查找规格、操作指南、开发说明、决策或研究资料，以及新增、移动或删除文档时，读取 [docs/INDEX.md](docs/INDEX.md)：文档分类、权威来源与维护规则。
+- 每次修改代码后，检查受影响的现行文档是否仍与实现一致；需要时在同一任务中更新
+  相应的权威文档及引用，无需更新时不做机械性的文档改动。
+
 ## Test seams
 
 共享测试契约位于 `~/projects/grok-image-saver/.agents/skills/beadwork-run/references/`；以下文件名均相对此目录，读取前展开 `~` 并解析为真实绝对路径（固定使用本项目 primary checkout 的入口）。直接读取参考文件即可，不启动 `beadwork-run`。
@@ -21,17 +29,15 @@
 
 ### Issue tracker
 
-Issues and specs are tracked in this repository's Beads database. See `docs/agents/issue-tracker.md`.
+本仓库的 issue 和 spec 使用 Beads。操作约定见 `docs/agents/issue-tracker.md`。
 
 ### Triage labels
 
-Use the five default triage labels. See `docs/agents/triage-labels.md`.
+使用五个默认 triage label。映射见 `docs/agents/triage-labels.md`。
 
 ### Domain docs
 
-涉及归档流程、状态、schema、协议或测试设计时，先读取 [architecture.md](architecture.md)、[CONTEXT.md](CONTEXT.md) 和 [ADR-0009](docs/adr/0009-use-in-memory-first-page-and-durable-post-processing.md)，再用 `bd show grok-image-saver-t9x --json` 读取唯一当前实现规格。旧批次方案、历史规格、`grok-image-saver-8gy` 决策地图与其他旧 tracker Resolution 只作来源证据。按新代码、新 schema、新协议和空 DB 设计；新流程自身必须可恢复，历史数据/版本/任务不做迁移或兼容。用户计划自行清空 DB，本条不授权执行清库。
-
-Use the single-context domain documentation layout. See `docs/agents/domain.md`.
+使用 single-context 领域文档布局。读取规则见 `docs/agents/domain.md`。
 
 ### JavaScript/TypeScript 工具链
 
