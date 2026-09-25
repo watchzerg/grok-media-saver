@@ -13,7 +13,7 @@ just gate-full
 
 `mise.toml` 声明 Bun 的兼容版本 line，`mise.lock` 固定精确构建；`package.json` 声明依赖，`bun.lock` 固定解析结果。两份锁文件均应提交。升级时先更新声明或允许范围，再刷新对应锁文件并重新运行验证。
 
-目前 `gate-full` 运行工具链、现有脚本的 TypeScript 静态检查与 Biome 检查。`just test core [path] [-t name]` 已接入 Bun 测试运行器；在首个测试写入前，它会因没有可收集的测试而失败。应用测试与构建、数据库、浏览器、系统边界尚未建立；增加真实测试或边界时，将相应验证纳入 `gate-core` 或新增边界 gate，并同步更新 `gate-plan` 和 `gate-full`。
+目前 `gate-full` 运行 `gate-core`，覆盖 Bun 版本、现有脚本的 TypeScript 静态检查与 Biome 检查。`just test` 或 `just test all` 调用全部 Bun 测试，`just test core [path] [-t name]` 调用基础测试或指定路径；也可直接传测试路径与 Bun 筛选参数。在首个测试写入前，测试命令会因没有可收集的测试而失败。应用测试与构建、数据库、浏览器、系统边界尚未建立；增加真实测试或边界时，将相应验证纳入 `gate-core` 或 `gate-full`。
 
 ## 文档入口
 

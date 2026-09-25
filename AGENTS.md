@@ -19,7 +19,7 @@
 
 ## Test seams
 
-共享测试契约位于 `~/projects/grok-image-saver/.agents/skills/beadwork-run/references/`；以下文件名均相对此目录，读取前展开 `~` 并解析为真实绝对路径（固定使用本项目 primary checkout 的入口）。直接读取参考文件即可，不启动 `beadwork-run`。
+共享测试契约位于 `~/projects/grok-media-saver/.agents/skills/beadwork-run/references/`；以下文件名均相对此目录，读取前展开 `~` 并解析为真实绝对路径（固定使用本项目 primary checkout 的入口）。直接读取参考文件即可，不启动 `beadwork-run`。
 
 - 使用 `to-spec` 前读取 `testing-seams.md`；确定测试模式和计划时读取 `testing-plan.md`。
 - 使用 `to-tickets` 前读取 `testing-plan.md` 和 `testing-gates.md`；解析 seam 引用时读取 `testing-seams.md`。 为 Beadwork 拆票或调整顺序时另读 `serial-planning.md`，在同一次确认中批准增量切片及执行顺序，并使用其脚本发布、校验和接纳 parent 计划。
@@ -49,16 +49,23 @@
   是默认 test runner。
 - **Biome** 负责格式化、lint（recommended 规则起步）与 import 排序；
   `biome ci` 由 `just gate-core` 纳入本地与交付的必需门禁。
-- **just** 是 agent 工作流的命令契约接口：仓库根 `justfile` 提供契约 recipe
-  （`install`、`typecheck`、带 scope 的 `test`、`gate-plan`、`gate-core`、
-  `gate-artifact`、`gate-database`、`gate-browser`、`gate-system`、`gate-full`、
-  `env-facts`、`check-toolchain`、`fmt`），内部转发 Bun/Biome 工具链。
-  所有完整 gate 均无参数；定向验证使用 `just test <scope> [path] [-t name]`。
-  agent 流程只调用 just 契约 recipe，不直接调用 `bun run` 验证命令。
+- **just** 是 agent 工作流的命令契约接口。必需入口为 `install`、`test [ARGS...]`、
+  `gate-core`、`gate-full`；`check-toolchain`、`typecheck`、`env-facts`、`fmt`
+  是独立开发命令。`install` 需要宿主上的 `just`、`mise` 和可安装的 Bun：
+  根据 `mise.toml`、`mise.lock` 安装 Bun，再按 `package.json`、`bun.lock`
+  执行 `bun ci`，重复调用应得到同一锁定环境；工具或依赖准备失败须返回非零。
+- `just test` 或 `just test all` 运行当前全部 Bun 测试；`just test core`
+  运行 `tests/core`。可在 scope 后传测试路径和 Bun 的 `-t <name>`，
+  也可直接传路径或 Bun 测试筛选参数；无法收窄时运行完整相关 suite。
+  目前尚无测试，零匹配或测试收集失败须返回非零。
+- `just gate-core` 无参数运行 Bun 版本检查、TypeScript 静态检查与 Biome CI，
+  是当前的快速基础检查；目前没有可运行的基础回归测试，也不启动数据库、
+  浏览器或系统边界。`just gate-full` 无参数运行当前完整验收，即现有
+  `gate-core`；新增测试、构建或真实边界时，须将必要验证纳入相应 gate。
+  当前没有服务或凭据准备要求；人工、线上及真实凭据验收不在此 gate 结论内。
+  agent 验证通过 just 入口执行；格式化使用 `just fmt [files...]`。
 - **版本策略**：`package.json` 中只有 Biome exact-pinned（格式化与 lint 的
   验证 identity），其余直接依赖用 caret range；`bun.lock` 必须提交，不因
-  lockfile 已精确解析而改用 manifest exact pin。`preinstall` 与发布 CLI 内置
-  版本 line gate，跨 line 运行会 fail closed。
-- 优先使用 Bun / Biome 的能力而非第三方依赖；没有等价能力时保留专门工具：
-  `tsc --noEmit`（权威 typecheck）、Playwright（真实浏览器与扩展自动化）、
-  外部 PostgreSQL。
+  lockfile 已精确解析而改用 manifest exact pin。`preinstall` 内置 Bun 版本
+  line gate，跨 line 运行会 fail closed。
+- 优先使用 Bun / Biome 的能力；当前另用 `tsc --noEmit` 作权威 typecheck。
