@@ -122,6 +122,7 @@ export async function connectBrowserSession(
       if (signal.aborted) onAbort();
       let requestTimer: ReturnType<typeof setTimeout> | undefined;
       let preRequestTimer: ReturnType<typeof setTimeout> | undefined;
+      let listRequestStarted = false;
       let requestTimedOut = false;
       let preRequestTimedOut = false;
       let rejectDeadline!: (error: Error) => void;
@@ -134,6 +135,11 @@ export async function connectBrowserSession(
           return;
         }
         if (isSavedListResponse(route.request().url())) {
+          if (listRequestStarted) {
+            await route.abort();
+            return;
+          }
+          listRequestStarted = true;
           if (preRequestTimer) clearTimeout(preRequestTimer);
           preRequestTimer = undefined;
           onRequestStart();
