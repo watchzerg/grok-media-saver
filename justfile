@@ -34,10 +34,12 @@ test *ARGS:
 gate-core:
     just check-toolchain
     just typecheck
+    just test core
     mise exec -- bun run biome ci
 
 gate-full:
     just gate-core
+    just test tests/cli
 
 env-facts:
     @mise exec -- bun -e 'console.log(JSON.stringify({bun: Bun.version, missing: []}))'
