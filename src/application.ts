@@ -1,11 +1,10 @@
-export type SavedAsset = { assetId: string; mimeType: string };
-export type PageResponse = {
-  status: number;
-  contentType: string;
-  body: unknown;
-  finalPath: string;
-  retryAfter?: string | null;
-};
+import {
+  type PageResponse,
+  RetryableRequestError,
+  type SavedAsset,
+} from "./grok/adapter";
+
+export type { PageResponse, SavedAsset } from "./grok/adapter";
 
 export type InspectResult = {
   status: "ok" | "blocked" | "failed" | "cancelled";
@@ -27,43 +26,6 @@ export type InspectOptions = {
   secrets?: string[];
 };
 
-const uuid =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-function parseAssets(body: unknown): SavedAsset[] | null {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
-  const assets = (body as Record<string, unknown>).assets;
-  if (!Array.isArray(assets)) return null;
-  const parsed: SavedAsset[] = [];
-  for (const value of assets) {
-    if (!value || typeof value !== "object" || Array.isArray(value))
-      return null;
-    const item = value as Record<string, unknown>;
-    const mimeType = item.mimeType ?? item.mediaType;
-    if (
-      typeof item.assetId !== "string" ||
-      !uuid.test(item.assetId) ||
-      typeof mimeType !== "string" ||
-      !mimeType.includes("/")
-    )
-      return null;
-    parsed.push({ assetId: item.assetId, mimeType });
-  }
-  return parsed;
-}
-
-function isBlocked(response: PageResponse): boolean {
-  return (
-    response.status === 401 ||
-    response.status === 429 ||
-    /\/(?:login|signin|challenge)(?:\/|$)/i.test(response.finalPath)
-  );
-}
-
-function isRetryableStatus(status: number): boolean {
-  return status === 408 || status >= 500;
-}
-
 export async function inspectFirstPage(
   options: InspectOptions,
 ): Promise<InspectResult> {
@@ -78,7 +40,22 @@ export async function inspectFirstPage(
   try {
     if (signal.aborted)
       return { ...result, status: "cancelled", message: "检查已停止。" };
-    session = await options.connect(signal);
+    const connecting = options.connect(signal);
+    let onAbort: (() => void) | undefined;
+    const stopped = new Promise<null>((resolve) => {
+      onAbort = () => resolve(null);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
+    const connected = await Promise.race([connecting, stopped]);
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+    if (!connected) {
+      void connecting
+        .then((lateSession) => lateSession.close())
+        .catch(() => {});
+      result = { ...result, status: "cancelled", message: "检查已停止。" };
+      return result;
+    }
+    session = connected;
     let attempt = 0;
     while (attempt < 2) {
       if (signal.aborted) {
@@ -94,7 +71,7 @@ export async function inspectFirstPage(
           result = { ...result, status: "cancelled", message: "检查已停止。" };
           break;
         }
-        if (attempt < 2) {
+        if (error instanceof RetryableRequestError && attempt < 2) {
           try {
             await options.waitBeforeRetry?.(signal);
           } catch (waitError) {
@@ -118,7 +95,7 @@ export async function inspectFirstPage(
         result = { ...result, status: "cancelled", message: "检查已停止。" };
         break;
       }
-      if (isBlocked(response)) {
+      if (response.kind === "blocked") {
         const wait = response.retryAfter
           ? `；服务端建议等待 ${response.retryAfter}`
           : "";
@@ -129,7 +106,7 @@ export async function inspectFirstPage(
         };
         break;
       }
-      if (isRetryableStatus(response.status) && attempt < 2) {
+      if (response.kind === "temporary" && attempt < 2) {
         try {
           await options.waitBeforeRetry?.(signal);
         } catch (waitError) {
@@ -143,31 +120,24 @@ export async function inspectFirstPage(
         }
         continue;
       }
-      if (
-        response.status !== 200 ||
-        !response.contentType.toLowerCase().includes("json")
-      ) {
+      if (response.kind === "temporary" || response.kind === "unavailable") {
         result = {
           ...result,
           message: `Saved 第一页不可读取（HTTP ${response.status}）。`,
         };
         break;
       }
-      const assets = parseAssets(response.body);
-      if (!assets) {
+      if (response.kind !== "page") {
         result = {
           ...result,
           message: "Saved 第一页返回了无法识别的数据结构。",
         };
         break;
       }
-      const hasNextPage = Boolean(
-        (response.body as Record<string, unknown>).nextPageToken,
-      );
       result = {
         status: "ok",
-        assets,
-        message: `Saved 第一页：${assets.length} 条${hasNextPage ? "，还有后续页面（未请求）" : ""}。${session.cleanupNotices?.length ? ` ${session.cleanupNotices.join(" ")}` : ""}`,
+        assets: response.assets,
+        message: `Saved 第一页：${response.assets.length} 条${response.hasNextPage ? "，还有后续页面（未请求）" : ""}。`,
         cleanupErrors: [],
       };
       break;
@@ -190,6 +160,9 @@ export async function inspectFirstPage(
         if (result.status !== "cancelled") result.status = "failed";
         result.message = `${result.message} ${result.cleanupErrors.at(-1)}`;
       }
+    }
+    if (session?.cleanupNotices?.length) {
+      result.message = `${result.message} ${session.cleanupNotices.join(" ")}`;
     }
   }
   return result;

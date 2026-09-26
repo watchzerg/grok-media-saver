@@ -4,6 +4,10 @@ import {
   inspectFirstPage,
   type PageResponse,
 } from "../../src/application";
+import {
+  parseSavedPageResponse,
+  RetryableRequestError,
+} from "../../src/grok/adapter";
 
 const first = {
   assetId: "123e4567-e89b-42d3-a456-426614174000",
@@ -11,12 +15,12 @@ const first = {
 };
 
 function response(body: unknown, status = 200): PageResponse {
-  return {
+  return parseSavedPageResponse({
     status,
     contentType: "application/json",
     body,
     finalPath: "/rest/assets",
-  };
+  });
 }
 
 function sessionFor(
@@ -152,7 +156,7 @@ test("inspect first-page keeps Ctrl+C exit classification when browser cleanup a
   expect(result.cleanupErrors).toHaveLength(1);
 });
 
-test("inspect first-page retries a network error once and then fails", async () => {
+test("inspect first-page does not retry an unclassified exception", async () => {
   let calls = 0;
   const result = await inspectFirstPage({
     connect: async () => ({
@@ -164,7 +168,68 @@ test("inspect first-page retries a network error once and then fails", async () 
     }),
   });
   expect(result.status).toBe("failed");
+  expect(calls).toBe(1);
+});
+
+test("inspect first-page retries a classified network failure once", async () => {
+  let calls = 0;
+  const result = await inspectFirstPage({
+    connect: async () => ({
+      getFirstPage: async () => {
+        calls += 1;
+        if (calls === 1) throw new RetryableRequestError("network reset");
+        return response({ assets: [first] });
+      },
+      close: async () => {},
+    }),
+  });
+  expect(result).toMatchObject({ status: "ok", assets: [first] });
   expect(calls).toBe(2);
+});
+
+test("inspect first-page accepts any UUID-shaped hex id without version limits", async () => {
+  const id = "ffffffff-0000-0000-0000-000000000001";
+  const result = await inspectFirstPage({
+    connect: async () =>
+      sessionFor(response({ assets: [{ ...first, assetId: id }] })),
+  });
+  expect(result).toMatchObject({ status: "ok", assets: [{ assetId: id }] });
+});
+
+test("inspect first-page reports cleanup notices when reading fails", async () => {
+  const result = await inspectFirstPage({
+    connect: async () => ({
+      ...sessionFor(response({}, 503)),
+      cleanupNotices: ["connect.html 归属不明，已保留。"],
+    }),
+  });
+  expect(result.status).toBe("failed");
+  expect(result.message).toContain("connect.html");
+});
+
+test("inspect first-page returns promptly when stopped during connection and closes a late session", async () => {
+  const controller = new AbortController();
+  let finishConnect!: (session: InspectSession) => void;
+  let closeCalls = 0;
+  const connecting = new Promise<InspectSession>((resolve) => {
+    finishConnect = resolve;
+  });
+  const resultPromise = inspectFirstPage({
+    signal: controller.signal,
+    connect: async () => connecting,
+  });
+  controller.abort();
+  const result = await resultPromise;
+  expect(result.status).toBe("cancelled");
+  finishConnect({
+    ...sessionFor(response({ assets: [] })),
+    close: async () => {
+      closeCalls += 1;
+    },
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(closeCalls).toBe(1);
 });
 
 test("inspect first-page never retries an unknown page structure", async () => {

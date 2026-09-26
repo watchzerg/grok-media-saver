@@ -1,5 +1,11 @@
 import bundle from "playwright-core/lib/coreBundle";
-import type { PageResponse } from "../application";
+import type { PageResponse, RawPageResponse } from "../grok/adapter";
+import {
+  isRetryableNetworkFailure,
+  parseSavedPageResponse,
+  RetryableRequestError,
+  UnconfirmedStopError,
+} from "../grok/adapter";
 
 const API_TIMEOUT_MS = 30_000;
 const CLEANUP_TIMEOUT_MS = 5_000;
@@ -15,7 +21,9 @@ export type BrowserSession = {
 export async function connectBrowserSession(
   savedPageUrl: string,
   onRequestStart: () => void,
+  signal: AbortSignal,
 ): Promise<BrowserSession> {
+  if (signal.aborted) throw new Error("检查已停止。");
   const { browser } = await bundle.tools.createBrowserWithInfo(
     {
       extension: true,
@@ -28,6 +36,10 @@ export async function connectBrowserSession(
     { clientName: "Grok Media Saver", cwd: process.cwd() },
     { browser: "chrome" },
   );
+  if (signal.aborted) {
+    await withTimeout(browser.close(), CLEANUP_TIMEOUT_MS);
+    throw new Error("检查已停止。");
+  }
   let closed = false;
   let disconnected = false;
   browser.on("disconnected", () => {
@@ -35,7 +47,13 @@ export async function connectBrowserSession(
   });
   const context = browser.contexts()[0];
   if (!context) {
-    await withTimeout(browser.close(), CLEANUP_TIMEOUT_MS).catch(() => {});
+    try {
+      await withTimeout(browser.close(), CLEANUP_TIMEOUT_MS);
+    } catch (error) {
+      throw new Error(
+        `Extension 未提供可用的 Chrome 登录态；连接清理失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     throw new Error("Extension 未提供可用的 Chrome 登录态。");
   }
   let page: Awaited<ReturnType<typeof context.newPage>> | undefined;
@@ -90,30 +108,46 @@ export async function connectBrowserSession(
           });
         }
         onRequestStart();
-        return await page.evaluate(async (path) => {
-          const response = await fetch(path, {
-            credentials: "include",
-            signal: AbortSignal.timeout(30_000),
-          });
-          const contentType = response.headers.get("content-type") ?? "";
-          const retryAfter = response.headers.get("retry-after");
-          const finalUrl = new URL(response.url);
-          let body: unknown = null;
-          if (contentType.toLowerCase().includes("json")) {
-            try {
-              body = await response.json();
-            } catch {
-              body = null;
+        let raw: RawPageResponse;
+        try {
+          raw = await page.evaluate(async (path) => {
+            const response = await fetch(path, {
+              credentials: "include",
+              signal: AbortSignal.timeout(30_000),
+            });
+            const contentType = response.headers.get("content-type") ?? "";
+            const retryAfter = response.headers.get("retry-after");
+            const finalUrl = new URL(response.url);
+            let body: unknown = null;
+            if (contentType.toLowerCase().includes("json")) {
+              try {
+                body = await response.json();
+              } catch {
+                body = null;
+              }
             }
-          }
-          return {
-            status: response.status,
-            contentType,
-            body,
-            finalPath: finalUrl.pathname,
-            retryAfter,
-          };
-        }, LIST_ENDPOINT);
+            return {
+              status: response.status,
+              contentType,
+              body,
+              finalPath: finalUrl.pathname,
+              retryAfter,
+            };
+          }, LIST_ENDPOINT);
+        } catch (error) {
+          if (signal.aborted) throw error;
+          if (disconnected)
+            throw new UnconfirmedStopError(
+              "Chrome Extension 连接中断，无法确认请求已停止。",
+              { cause: error },
+            );
+          if (isRetryableNetworkFailure(error))
+            throw new RetryableRequestError("Saved 请求发生网络错误或超时。", {
+              cause: error,
+            });
+          throw error;
+        }
+        return parseSavedPageResponse(raw);
       } finally {
         signal.removeEventListener("abort", onAbort);
       }
