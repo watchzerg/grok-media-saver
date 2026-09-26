@@ -1,7 +1,12 @@
 import bundle from "playwright-core/lib/coreBundle";
-import type { PageResponse, RawPageResponse } from "../grok/adapter";
+import type {
+  PageResponse,
+  PostResponse,
+  RawPageResponse,
+} from "../grok/adapter";
 import {
   isRetryableNetworkFailure,
+  parsePostDetailResponse,
   parseSavedPageResponse,
   RetryableRequestError,
   UnconfirmedStopError,
@@ -13,6 +18,7 @@ const LIST_REQUEST_PATTERN = "**/rest/assets?*";
 
 export type BrowserSession = {
   getFirstPage(signal: AbortSignal): Promise<PageResponse>;
+  getPostDetail(assetId: string, signal: AbortSignal): Promise<PostResponse>;
   close(): Promise<void>;
   cleanupNotices: string[];
 };
@@ -292,6 +298,191 @@ export async function connectBrowserSession(
         signal.removeEventListener("abort", onAbort);
       }
     },
+    async getPostDetail(assetId, signal) {
+      if (closed || disconnected)
+        throw new Error("Chrome Extension 连接已断开。");
+      if (signal.aborted) throw new Error("检查已停止。");
+      if (!page || page.isClosed()) {
+        page = await context.newPage();
+        closingPage = undefined;
+      }
+      let rejectStopped!: (error: Error) => void;
+      const stopped = new Promise<never>((_, reject) => {
+        rejectStopped = reject;
+      });
+      void stopped.catch(() => {});
+      const onAbort = () => {
+        void closeOwnedPage().catch(() => {});
+        rejectStopped(new Error("检查已停止。"));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+      let requestTimer: ReturnType<typeof setTimeout> | undefined;
+      let preRequestTimer: ReturnType<typeof setTimeout> | undefined;
+      let detailRequestStarted = false;
+      let requestTimedOut = false;
+      let preRequestTimedOut = false;
+      let rejectDeadline!: (error: Error) => void;
+      const deadline = new Promise<never>((_, reject) => {
+        rejectDeadline = reject;
+      });
+      const routePostDetail = async (route: PageRouteLike) => {
+        if (signal.aborted || requestTimedOut || preRequestTimedOut) {
+          await route.abort();
+          return;
+        }
+        if (isPostDetailResponse(route.request().url(), assetId)) {
+          if (detailRequestStarted) {
+            await route.abort();
+            return;
+          }
+          detailRequestStarted = true;
+          if (preRequestTimer) clearTimeout(preRequestTimer);
+          preRequestTimer = undefined;
+          onRequestStart();
+          requestTimer = setTimeout(() => {
+            requestTimedOut = true;
+            const error = new Error("Post 详情请求超过 30 秒总期限。");
+            error.name = "TimeoutError";
+            rejectDeadline(error);
+          }, API_TIMEOUT_MS);
+        }
+        if (signal.aborted) {
+          await route.abort();
+          return;
+        }
+        await route.continue();
+      };
+      try {
+        const detailPattern = `**/rest/assets/${assetId}**`;
+        await Promise.race([
+          page.route(detailPattern, routePostDetail),
+          stopped,
+        ]);
+        const preRequestDeadline = new Promise<never>((_, reject) => {
+          preRequestTimer = setTimeout(() => {
+            preRequestTimedOut = true;
+            const error = new Error("Post 页面未在 30 秒内发起详情请求。");
+            error.name = "TimeoutError";
+            reject(error);
+          }, API_TIMEOUT_MS);
+        });
+        const responsePromise = page.waitForResponse(
+          (response) => isPostDetailResponse(response.url(), assetId),
+          { timeout: 0 },
+        );
+        const postUrl = `https://grok.com/imagine/post/${assetId}`;
+        const navigation = page
+          .goto(postUrl, { waitUntil: "domcontentloaded", timeout: 0 })
+          .then((navigation) => {
+            if (
+              isAuthenticationPage(page?.url()) ||
+              isAuthenticationPage(navigation?.url())
+            )
+              throw new AuthenticationBlockedError(navigation?.status() ?? 0);
+            return responsePromise;
+          });
+        const response = await Promise.race([
+          responsePromise,
+          navigation,
+          preRequestDeadline,
+          deadline,
+          stopped,
+        ]);
+        const responseUrl = new URL(response.url());
+        const headers = response.headers();
+        const contentType = headers["content-type"] ?? "";
+        let body: unknown = null;
+        if (contentType.toLowerCase().includes("json")) {
+          try {
+            body = await Promise.race([response.json(), deadline, stopped]);
+          } catch (error) {
+            if (
+              signal.aborted ||
+              requestTimedOut ||
+              isRetryableNetworkFailure(error)
+            )
+              throw error;
+            body = null;
+          }
+        }
+        const raw: RawPageResponse = {
+          status: response.status(),
+          contentType,
+          body,
+          finalPath:
+            authenticationRedirectPath(headers.location, response.url()) ??
+            responseUrl.pathname,
+          retryAfter: headers["retry-after"] ?? null,
+        };
+        if (isAuthenticationPage(page?.url()))
+          throw new AuthenticationBlockedError(response.status());
+        if (disconnected)
+          throw new UnconfirmedStopError(
+            "Chrome Extension 连接中断，无法确认请求已停止。",
+          );
+        const parsed = parsePostDetailResponse(assetId, raw);
+        if (
+          parsed.kind === "temporary" ||
+          parsed.kind === "blocked" ||
+          authenticationRedirectPath(headers.location, response.url())
+        ) {
+          try {
+            await closeOwnedPage();
+          } catch (cleanupError) {
+            throw new UnconfirmedStopError(
+              "Post 详情请求停止无法确认，已禁止继续。",
+              { cause: cleanupError },
+            );
+          }
+        }
+        return parsed;
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (
+          error instanceof AuthenticationBlockedError ||
+          isAuthenticationPage(page?.url())
+        ) {
+          try {
+            await closeOwnedPage();
+          } catch (cleanupError) {
+            throw new UnconfirmedStopError(
+              "登录阻挡后 Post 请求停止无法确认。",
+              { cause: cleanupError },
+            );
+          }
+          return {
+            kind: "blocked",
+            status:
+              error instanceof AuthenticationBlockedError ? error.status : 0,
+            reason: "authentication",
+          };
+        }
+        if (disconnected)
+          throw new UnconfirmedStopError(
+            "Chrome Extension 连接中断，无法确认请求已停止。",
+            { cause: error },
+          );
+        if (isRetryableNetworkFailure(error)) {
+          try {
+            await closeOwnedPage();
+          } catch (cleanupError) {
+            throw new UnconfirmedStopError(
+              "Post 详情请求停止无法确认，已禁止重试。",
+              { cause: cleanupError },
+            );
+          }
+          throw new RetryableRequestError("Post 详情请求发生网络错误或超时。", {
+            cause: error,
+          });
+        }
+        throw error;
+      } finally {
+        if (requestTimer) clearTimeout(requestTimer);
+        if (preRequestTimer) clearTimeout(preRequestTimer);
+        signal.removeEventListener("abort", onAbort);
+      }
+    },
     close,
   };
 }
@@ -331,6 +522,15 @@ function isSavedListResponse(value: string): boolean {
       url.searchParams.get("orderBy") === "ORDER_BY_CREATE_TIME" &&
       url.searchParams.get("workspaceKind") === "WORKSPACE_KIND_IMAGINE_ALL"
     );
+  } catch {
+    return false;
+  }
+}
+
+function isPostDetailResponse(value: string, assetId: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.pathname === `/rest/assets/${assetId}`;
   } catch {
     return false;
   }

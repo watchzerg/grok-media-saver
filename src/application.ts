@@ -1,10 +1,18 @@
 import {
+  normalizePostId,
   type PageResponse,
+  type PostMediaSelection,
+  type PostResponse,
   RetryableRequestError,
   type SavedAsset,
 } from "./grok/adapter";
 
-export type { PageResponse, SavedAsset } from "./grok/adapter";
+export type {
+  PageResponse,
+  PostMediaSelection,
+  PostResponse,
+  SavedAsset,
+} from "./grok/adapter";
 
 export type InspectResult = {
   status: "ok" | "blocked" | "failed" | "cancelled";
@@ -25,6 +33,175 @@ export type InspectOptions = {
   waitBeforeRetry?: (signal: AbortSignal) => Promise<void>;
   secrets?: string[];
 };
+
+export type InspectPostSession = {
+  getPostDetail(assetId: string, signal: AbortSignal): Promise<PostResponse>;
+  close(): Promise<void>;
+  cleanupNotices?: string[];
+};
+
+export type InspectPostResult = {
+  status: InspectResult["status"];
+  selection?: PostMediaSelection;
+  message: string;
+  cleanupErrors: string[];
+};
+
+export type InspectPostOptions = Omit<InspectOptions, "connect"> & {
+  connect(signal: AbortSignal): Promise<InspectPostSession>;
+};
+
+export async function inspectPost(
+  assetId: string,
+  options: InspectPostOptions,
+): Promise<InspectPostResult> {
+  const normalizedId = normalizePostId(assetId);
+  if (!normalizedId)
+    return {
+      status: "failed",
+      message: "Post ID 必须是带连字符的 UUID。",
+      cleanupErrors: [],
+    };
+  const signal = options.signal ?? new AbortController().signal;
+  let session: InspectPostSession | undefined;
+  let result: InspectPostResult = {
+    status: "failed",
+    message: "无法连接浏览器。",
+    cleanupErrors: [],
+  };
+  try {
+    if (signal.aborted)
+      return { ...result, status: "cancelled", message: "检查已停止。" };
+    session = await options.connect(signal);
+    let attempt = 0;
+    while (attempt < 2) {
+      if (signal.aborted) {
+        result = { ...result, status: "cancelled", message: "检查已停止。" };
+        break;
+      }
+      attempt += 1;
+      let response: PostResponse;
+      const onAbort = () => rejectStopped(new Error("检查已停止。"));
+      let rejectStopped!: (error: Error) => void;
+      const stopped = new Promise<never>((_, reject) => {
+        rejectStopped = reject;
+      });
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+      try {
+        response = await Promise.race([
+          session.getPostDetail(normalizedId, signal),
+          stopped,
+        ]);
+      } catch (error) {
+        if (signal.aborted) {
+          result = { ...result, status: "cancelled", message: "检查已停止。" };
+          break;
+        }
+        if (error instanceof RetryableRequestError && attempt < 2) {
+          try {
+            await options.waitBeforeRetry?.(signal);
+          } catch (waitError) {
+            result = signal.aborted
+              ? { ...result, status: "cancelled", message: "检查已停止。" }
+              : {
+                  ...result,
+                  message: `等待下一次请求失败：${safeError(waitError, options.secrets)}`,
+                };
+            break;
+          }
+          continue;
+        }
+        result = {
+          ...result,
+          message: `读取 Post 详情失败：${safeError(error, options.secrets)}`,
+        };
+        break;
+      } finally {
+        signal.removeEventListener("abort", onAbort);
+      }
+      if (signal.aborted) {
+        result = { ...result, status: "cancelled", message: "检查已停止。" };
+        break;
+      }
+      if (response.kind === "blocked") {
+        const wait = response.retryAfter
+          ? `；服务端建议等待 ${response.retryAfter}`
+          : "";
+        const reason =
+          response.reason === "authentication" ? "登录或 challenge" : "";
+        const status = response.status ? `HTTP ${response.status}` : "";
+        result = {
+          ...result,
+          status: "blocked",
+          message: `Post 请求被阻挡（${[reason, status].filter(Boolean).join("，")}）${wait}。`,
+        };
+        break;
+      }
+      if (response.kind === "temporary" && attempt < 2) {
+        try {
+          await options.waitBeforeRetry?.(signal);
+        } catch (waitError) {
+          result = signal.aborted
+            ? { ...result, status: "cancelled", message: "检查已停止。" }
+            : {
+                ...result,
+                message: `等待下一次请求失败：${safeError(waitError, options.secrets)}`,
+              };
+          break;
+        }
+        continue;
+      }
+      if (response.kind === "temporary" || response.kind === "unavailable") {
+        result = {
+          ...result,
+          message: `Post 详情不可读取（HTTP ${response.status}）。`,
+        };
+        break;
+      }
+      if (response.kind !== "post") {
+        result = { ...result, message: "Post 详情身份或媒体结构不受支持。" };
+        break;
+      }
+      result = {
+        status: "ok",
+        selection: response.selection,
+        message: "Post 身份与主体媒体已确认。",
+        cleanupErrors: [],
+      };
+      break;
+    }
+  } catch (error) {
+    if (signal.aborted) {
+      const detail = safeError(error, options.secrets);
+      result = { ...result, status: "cancelled", message: "检查已停止。" };
+      if (/清理失败|未能在 5 秒内/.test(detail)) {
+        result.cleanupErrors.push(`浏览器清理失败：${detail}`);
+        result.message = `${result.message} ${result.cleanupErrors.at(-1)}`;
+      }
+    } else {
+      result = {
+        ...result,
+        message: `浏览器连接失败：${safeError(error, options.secrets)}`,
+      };
+    }
+  } finally {
+    if (session) {
+      try {
+        await session.close();
+      } catch (error) {
+        result.cleanupErrors.push(
+          `浏览器清理失败：${safeError(error, options.secrets)}`,
+        );
+        if (result.status !== "cancelled") result.status = "failed";
+        result.message = `${result.message} ${result.cleanupErrors.at(-1)}`;
+      }
+    }
+    if (session?.cleanupNotices?.length)
+      result.message = `${result.message} ${session.cleanupNotices.join(" ")}`;
+  }
+  return result;
+}
 
 export async function inspectFirstPage(
   options: InspectOptions,

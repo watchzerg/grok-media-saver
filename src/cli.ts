@@ -1,14 +1,26 @@
-import { inspectSavedFirstPage } from "./application-runtime";
+import { inspectSavedFirstPage, inspectSavedPost } from "./application-runtime";
 import { type InspectConfig, readInspectConfig } from "./config";
+import { normalizePostId } from "./grok/adapter";
 
-const usage = "用法：grok-media-saver inspect first-page";
+const usage =
+  "用法：grok-media-saver inspect first-page | inspect post <Post ID>";
 
 export async function main(
   args: string[],
   env: Record<string, string | undefined> = process.env,
 ): Promise<number> {
-  if (args.length !== 2 || args[0] !== "inspect" || args[1] !== "first-page") {
+  const isFirstPage =
+    args.length === 2 && args[0] === "inspect" && args[1] === "first-page";
+  const isPost =
+    args.length === 3 && args[0] === "inspect" && args[1] === "post";
+  if (!isFirstPage && !isPost) {
     console.error(usage);
+    return 2;
+  }
+
+  const assetId = isPost ? normalizePostId(args[2]) : undefined;
+  if (isPost && !assetId) {
+    console.error("Post ID 必须是带连字符的 UUID。");
     return 2;
   }
 
@@ -33,10 +45,15 @@ export async function main(
   process.on("SIGINT", stop);
   let exitCode = 1;
   try {
-    const result = await inspectSavedFirstPage(config, controller.signal);
+    const result = isPost
+      ? await inspectSavedPost(config, assetId as string, controller.signal)
+      : await inspectSavedFirstPage(config, controller.signal);
     console.log(result.message);
-    for (const asset of result.assets)
-      console.log(`${asset.assetId}  ${asset.mimeType}`);
+    if ("assets" in result)
+      for (const asset of result.assets)
+        console.log(`${asset.assetId}  ${asset.mimeType}`);
+    if ("selection" in result && result.selection)
+      console.log(`${result.selection.mimeType}  ${result.selection.quality}`);
     for (const error of result.cleanupErrors) console.error(error);
     if (result.status === "ok") exitCode = 0;
     else if (result.status === "cancelled") exitCode = 130;
