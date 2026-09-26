@@ -115,17 +115,21 @@ export async function connectBrowserSession(
       const onAbort = () => abortOwnedPage();
       signal.addEventListener("abort", onAbort, { once: true });
       let requestTimer: ReturnType<typeof setTimeout> | undefined;
+      let preRequestTimer: ReturnType<typeof setTimeout> | undefined;
       let requestTimedOut = false;
+      let preRequestTimedOut = false;
       let rejectDeadline!: (error: Error) => void;
       const deadline = new Promise<never>((_, reject) => {
         rejectDeadline = reject;
       });
       const routeSavedListRequest = async (route: PageRouteLike) => {
-        if (signal.aborted || requestTimedOut) {
+        if (signal.aborted || requestTimedOut || preRequestTimedOut) {
           await route.abort();
           return;
         }
         if (isSavedListResponse(route.request().url())) {
+          if (preRequestTimer) clearTimeout(preRequestTimer);
+          preRequestTimer = undefined;
           onRequestStart();
           if (!requestTimer)
             requestTimer = setTimeout(() => {
@@ -148,16 +152,24 @@ export async function connectBrowserSession(
           listRouteInstalled = true;
         }
         if (signal.aborted) throw new Error("检查已停止。");
+        const preRequestDeadline = new Promise<never>((_, reject) => {
+          preRequestTimer = setTimeout(() => {
+            preRequestTimedOut = true;
+            const error = new Error("Saved 页面未在 30 秒内发起列表请求。");
+            error.name = "TimeoutError";
+            reject(error);
+          }, API_TIMEOUT_MS);
+        });
         const responsePromise = page.waitForResponse(
           (response) => isSavedListResponse(response.url()),
-          { timeout: API_TIMEOUT_MS },
+          { timeout: 0 },
         );
         const [, response] = await Promise.race([
           Promise.all([
             page
               .goto(savedPageUrl, {
                 waitUntil: "domcontentloaded",
-                timeout: API_TIMEOUT_MS,
+                timeout: 0,
               })
               .then((navigation) => {
                 if (
@@ -171,6 +183,7 @@ export async function connectBrowserSession(
               }),
             responsePromise,
           ]),
+          preRequestDeadline,
           deadline,
         ]);
         const responseUrl = new URL(response.url());
@@ -256,6 +269,7 @@ export async function connectBrowserSession(
         throw error;
       } finally {
         if (requestTimer) clearTimeout(requestTimer);
+        if (preRequestTimer) clearTimeout(preRequestTimer);
         signal.removeEventListener("abort", onAbort);
       }
     },
