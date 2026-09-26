@@ -24,11 +24,30 @@ type BrowserContextLike = {
 
 type PageLike = {
   url(): string;
+  route(
+    url: string,
+    handler: (route: PageRouteLike) => Promise<void>,
+  ): Promise<void>;
   goto(
     url: string,
     options: { waitUntil: "domcontentloaded"; timeout: number },
   ): Promise<unknown>;
-  evaluate<T>(fn: (input: string) => Promise<T>, input: string): Promise<T>;
+  waitForResponse(
+    predicate: (response: PageResponseLike) => boolean,
+    options: { timeout: number },
+  ): Promise<PageResponseLike>;
   close(options?: { runBeforeUnload?: boolean }): Promise<void>;
   isClosed(): boolean;
+};
+
+type PageRouteLike = {
+  request(): { url(): string };
+  continue(): Promise<void>;
+};
+
+type PageResponseLike = {
+  url(): string;
+  status(): number;
+  headers(): Record<string, string>;
+  json(): Promise<unknown>;
 };

@@ -207,10 +207,11 @@ test("inspect first-page reports cleanup notices when reading fails", async () =
   expect(result.message).toContain("connect.html");
 });
 
-test("inspect first-page returns promptly when stopped during connection and closes a late session", async () => {
+test("inspect first-page waits for late connection cleanup after cancellation", async () => {
   const controller = new AbortController();
   let finishConnect!: (session: InspectSession) => void;
   let closeCalls = 0;
+  let pageCalls = 0;
   const connecting = new Promise<InspectSession>((resolve) => {
     finishConnect = resolve;
   });
@@ -219,17 +220,46 @@ test("inspect first-page returns promptly when stopped during connection and clo
     connect: async () => connecting,
   });
   controller.abort();
-  const result = await resultPromise;
-  expect(result.status).toBe("cancelled");
   finishConnect({
-    ...sessionFor(response({ assets: [] })),
+    getFirstPage: async () => {
+      pageCalls += 1;
+      return response({ assets: [] });
+    },
     close: async () => {
       closeCalls += 1;
     },
   });
+  const result = await resultPromise;
+  expect(result.status).toBe("cancelled");
+  expect(pageCalls).toBe(0);
   await Promise.resolve();
   await Promise.resolve();
   expect(closeCalls).toBe(1);
+});
+
+test("inspect first-page waits for late connection cleanup and reports its failure", async () => {
+  const controller = new AbortController();
+  let finishConnect!: (session: InspectSession) => void;
+  const connecting = new Promise<InspectSession>((resolve) => {
+    finishConnect = resolve;
+  });
+  const resultPromise = inspectFirstPage({
+    signal: controller.signal,
+    connect: async () => connecting,
+  });
+
+  controller.abort();
+  finishConnect({
+    ...sessionFor(response({ assets: [] })),
+    close: async () => {
+      throw new Error("late close failed");
+    },
+  });
+
+  const result = await resultPromise;
+  expect(result.status).toBe("cancelled");
+  expect(result.cleanupErrors).toEqual(["浏览器清理失败：late close failed"]);
+  expect(result.message).toContain("late close failed");
 });
 
 test("inspect first-page never retries an unknown page structure", async () => {

@@ -40,38 +40,65 @@ export async function inspectFirstPage(
   try {
     if (signal.aborted)
       return { ...result, status: "cancelled", message: "检查已停止。" };
-    const connecting = options.connect(signal);
-    let onAbort: (() => void) | undefined;
-    const stopped = new Promise<null>((resolve) => {
-      onAbort = () => resolve(null);
-      signal.addEventListener("abort", onAbort, { once: true });
-    });
-    const connected = await Promise.race([connecting, stopped]);
-    if (onAbort) signal.removeEventListener("abort", onAbort);
-    if (!connected) {
-      void connecting
-        .then((lateSession) => lateSession.close())
-        .catch(() => {});
+    session = await options.connect(signal);
+    if (signal.aborted) {
       result = { ...result, status: "cancelled", message: "检查已停止。" };
-      return result;
-    }
-    session = connected;
-    let attempt = 0;
-    while (attempt < 2) {
-      if (signal.aborted) {
-        result = { ...result, status: "cancelled", message: "检查已停止。" };
-        break;
-      }
-      attempt += 1;
-      let response: PageResponse;
-      try {
-        response = await session.getFirstPage(signal);
-      } catch (error) {
+    } else {
+      let attempt = 0;
+      while (attempt < 2) {
         if (signal.aborted) {
           result = { ...result, status: "cancelled", message: "检查已停止。" };
           break;
         }
-        if (error instanceof RetryableRequestError && attempt < 2) {
+        attempt += 1;
+        let response: PageResponse;
+        try {
+          response = await session.getFirstPage(signal);
+        } catch (error) {
+          if (signal.aborted) {
+            result = {
+              ...result,
+              status: "cancelled",
+              message: "检查已停止。",
+            };
+            break;
+          }
+          if (error instanceof RetryableRequestError && attempt < 2) {
+            try {
+              await options.waitBeforeRetry?.(signal);
+            } catch (waitError) {
+              result = signal.aborted
+                ? { ...result, status: "cancelled", message: "检查已停止。" }
+                : {
+                    ...result,
+                    message: `等待下一次请求失败：${safeError(waitError, options.secrets)}`,
+                  };
+              break;
+            }
+            continue;
+          }
+          result = {
+            ...result,
+            message: `读取 Saved 第一页失败：${safeError(error, options.secrets)}`,
+          };
+          break;
+        }
+        if (signal.aborted) {
+          result = { ...result, status: "cancelled", message: "检查已停止。" };
+          break;
+        }
+        if (response.kind === "blocked") {
+          const wait = response.retryAfter
+            ? `；服务端建议等待 ${response.retryAfter}`
+            : "";
+          result = {
+            ...result,
+            status: "blocked",
+            message: `Saved 请求被阻挡（HTTP ${response.status}）${wait}。`,
+          };
+          break;
+        }
+        if (response.kind === "temporary" && attempt < 2) {
           try {
             await options.waitBeforeRetry?.(signal);
           } catch (waitError) {
@@ -85,70 +112,43 @@ export async function inspectFirstPage(
           }
           continue;
         }
-        result = {
-          ...result,
-          message: `读取 Saved 第一页失败：${safeError(error, options.secrets)}`,
-        };
-        break;
-      }
-      if (signal.aborted) {
-        result = { ...result, status: "cancelled", message: "检查已停止。" };
-        break;
-      }
-      if (response.kind === "blocked") {
-        const wait = response.retryAfter
-          ? `；服务端建议等待 ${response.retryAfter}`
-          : "";
-        result = {
-          ...result,
-          status: "blocked",
-          message: `Saved 请求被阻挡（HTTP ${response.status}）${wait}。`,
-        };
-        break;
-      }
-      if (response.kind === "temporary" && attempt < 2) {
-        try {
-          await options.waitBeforeRetry?.(signal);
-        } catch (waitError) {
-          result = signal.aborted
-            ? { ...result, status: "cancelled", message: "检查已停止。" }
-            : {
-                ...result,
-                message: `等待下一次请求失败：${safeError(waitError, options.secrets)}`,
-              };
+        if (response.kind === "temporary" || response.kind === "unavailable") {
+          result = {
+            ...result,
+            message: `Saved 第一页不可读取（HTTP ${response.status}）。`,
+          };
           break;
         }
-        continue;
-      }
-      if (response.kind === "temporary" || response.kind === "unavailable") {
+        if (response.kind !== "page") {
+          result = {
+            ...result,
+            message: "Saved 第一页返回了无法识别的数据结构。",
+          };
+          break;
+        }
         result = {
-          ...result,
-          message: `Saved 第一页不可读取（HTTP ${response.status}）。`,
+          status: "ok",
+          assets: response.assets,
+          message: `Saved 第一页：${response.assets.length} 条${response.hasNextPage ? "，还有后续页面（未请求）" : ""}。`,
+          cleanupErrors: [],
         };
         break;
       }
-      if (response.kind !== "page") {
-        result = {
-          ...result,
-          message: "Saved 第一页返回了无法识别的数据结构。",
-        };
-        break;
-      }
-      result = {
-        status: "ok",
-        assets: response.assets,
-        message: `Saved 第一页：${response.assets.length} 条${response.hasNextPage ? "，还有后续页面（未请求）" : ""}。`,
-        cleanupErrors: [],
-      };
-      break;
     }
   } catch (error) {
-    result = signal.aborted
-      ? { ...result, status: "cancelled", message: "检查已停止。" }
-      : {
-          ...result,
-          message: `浏览器连接失败：${safeError(error, options.secrets)}`,
-        };
+    if (signal.aborted) {
+      const detail = safeError(error, options.secrets);
+      result = { ...result, status: "cancelled", message: "检查已停止。" };
+      if (/清理失败|未能在 5 秒内/.test(detail)) {
+        result.cleanupErrors.push(`浏览器清理失败：${detail}`);
+        result.message = `${result.message} ${result.cleanupErrors.at(-1)}`;
+      }
+    } else {
+      result = {
+        ...result,
+        message: `浏览器连接失败：${safeError(error, options.secrets)}`,
+      };
+    }
   } finally {
     if (session) {
       try {

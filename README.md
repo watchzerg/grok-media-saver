@@ -1,6 +1,6 @@
 # grok-media-saver
 
-本项目面向个人本地使用，目标是利用现有 Chrome 登录态，将 Grok Saved 列表中的 AI 生成图片和常见小视频可靠归档到本地，并在安全保存后移除对应远端 Post。当前提供只读 Saved 第一页检查的 Application/CLI 路径；正式 Extension 连接和 Saved 列表协议仍需现场验收。归档行为以[一期可靠保存规格](docs/specs/phase1-saving.md)为准。
+本项目面向个人本地使用，目标是利用现有 Chrome 登录态，将 Grok Saved 列表中的 AI 生成图片和常见小视频可靠归档到本地，并在安全保存后移除对应远端 Post。当前提供只读 Saved 第一页检查的 Application/CLI 路径。2026-09-27 的正式主机验收中，CLI 两次成功连接并读取 40 条第一页，断开后 Chrome 仍运行且第二次成功重连；现场也核对了 Saved 页自动发出的第一页请求及其过滤条件。Ctrl+C 竞速、连接断开与清理故障尚未在正式浏览器中触发，媒体保存传输也尚未现场验收。归档行为以[一期可靠保存规格](docs/specs/phase1-saving.md)为准。
 
 ## 工具链
 
@@ -21,7 +21,7 @@ just gate-full
 mise exec -- bun src/cli.ts inspect first-page
 ```
 
-命令只读取一次 Saved 第一页，不展开 Post，不建立 Run 或 Post 工作。现场连接、请求、断开与重连尚须按[一期浏览器验收要求](docs/research/phase1-browser-session.md#尚未验证与首个切片的验收)单独验证。
+命令只读取一次 Saved 第一页，不展开 Post，不建立 Run 或 Post 工作。正式连接、第一页响应、关闭连接和重新连接已完成现场验收；Saved 页的首请求为 `workspaceKind=WORKSPACE_KIND_IMAGINE_ALL`、`pageSize=40`。取消竞速、真实断连故障及清理失败仍需按[一期浏览器验收要求](docs/research/phase1-browser-session.md#尚未验证与首个切片的验收)验证。
 
 ## 文档入口
 

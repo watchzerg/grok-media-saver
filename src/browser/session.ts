@@ -9,8 +9,7 @@ import {
 
 const API_TIMEOUT_MS = 30_000;
 const CLEANUP_TIMEOUT_MS = 5_000;
-const LIST_ENDPOINT =
-  "/rest/assets?pageSize=40&orderBy=ORDER_BY_CREATE_TIME&workspaceKind=WORKSPACE_KIND_IMAGINE_ALL";
+const LIST_REQUEST_PATTERN = "**/rest/assets?*";
 
 export type BrowserSession = {
   getFirstPage(signal: AbortSignal): Promise<PageResponse>;
@@ -37,7 +36,13 @@ export async function connectBrowserSession(
     { browser: "chrome" },
   );
   if (signal.aborted) {
-    await withTimeout(browser.close(), CLEANUP_TIMEOUT_MS);
+    try {
+      await withTimeout(browser.close(), CLEANUP_TIMEOUT_MS);
+    } catch (error) {
+      throw new Error(
+        `检查已停止；浏览器连接清理失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     throw new Error("检查已停止。");
   }
   let closed = false;
@@ -57,6 +62,7 @@ export async function connectBrowserSession(
     throw new Error("Extension 未提供可用的 Chrome 登录态。");
   }
   let page: Awaited<ReturnType<typeof context.newPage>> | undefined;
+  let closingPage: Promise<void> | undefined;
   const cleanupNotices = context
     .pages()
     .some((existingPage) =>
@@ -67,16 +73,20 @@ export async function connectBrowserSession(
       ]
     : [];
 
+  const closeOwnedPage = () => {
+    if (!page || page.isClosed()) return Promise.resolve();
+    closingPage ??= withTimeout(page.close(), CLEANUP_TIMEOUT_MS);
+    return closingPage;
+  };
+
   const close = async () => {
     if (closed) return;
     closed = true;
     const failures: string[] = [];
-    if (page && !page.isClosed()) {
-      try {
-        await withTimeout(page.close(), CLEANUP_TIMEOUT_MS);
-      } catch {
-        failures.push("应用创建的 Saved 页面未能在 5 秒内关闭");
-      }
+    try {
+      await closeOwnedPage();
+    } catch {
+      failures.push("应用创建的 Saved 页面未能在 5 秒内关闭");
     }
     try {
       await withTimeout(browser.close(), CLEANUP_TIMEOUT_MS);
@@ -87,8 +97,12 @@ export async function connectBrowserSession(
   };
 
   const abortOwnedPage = () => {
-    if (page && !page.isClosed())
-      void withTimeout(page.close(), CLEANUP_TIMEOUT_MS).catch(() => {});
+    void closeOwnedPage().catch(() => {});
+  };
+  let listRouteInstalled = false;
+  const routeSavedListRequest = async (route: PageRouteLike) => {
+    if (isSavedListResponse(route.request().url())) onRequestStart();
+    await route.continue();
   };
 
   return {
@@ -101,59 +115,77 @@ export async function connectBrowserSession(
       const onAbort = () => abortOwnedPage();
       signal.addEventListener("abort", onAbort, { once: true });
       try {
-        if (page.url() === "about:blank") {
-          await page.goto(savedPageUrl, {
+        if (signal.aborted) throw new Error("检查已停止。");
+        if (!listRouteInstalled) {
+          await page.route(LIST_REQUEST_PATTERN, routeSavedListRequest);
+          listRouteInstalled = true;
+        }
+        const responsePromise = page.waitForResponse(
+          (response) => isSavedListResponse(response.url()),
+          { timeout: API_TIMEOUT_MS },
+        );
+        const [, response] = await Promise.all([
+          page.goto(savedPageUrl, {
             waitUntil: "domcontentloaded",
             timeout: API_TIMEOUT_MS,
-          });
+          }),
+          responsePromise,
+        ]);
+        const responseUrl = new URL(response.url());
+        const headers = response.headers();
+        const contentType = headers["content-type"] ?? "";
+        let body: unknown = null;
+        if (contentType.toLowerCase().includes("json")) {
+          try {
+            body = await response.json();
+          } catch {
+            body = null;
+          }
         }
-        onRequestStart();
-        let raw: RawPageResponse;
-        try {
-          raw = await page.evaluate(async (path) => {
-            const response = await fetch(path, {
-              credentials: "include",
-              signal: AbortSignal.timeout(30_000),
-            });
-            const contentType = response.headers.get("content-type") ?? "";
-            const retryAfter = response.headers.get("retry-after");
-            const finalUrl = new URL(response.url);
-            let body: unknown = null;
-            if (contentType.toLowerCase().includes("json")) {
-              try {
-                body = await response.json();
-              } catch {
-                body = null;
-              }
-            }
-            return {
-              status: response.status,
-              contentType,
-              body,
-              finalPath: finalUrl.pathname,
-              retryAfter,
-            };
-          }, LIST_ENDPOINT);
-        } catch (error) {
-          if (signal.aborted) throw error;
-          if (disconnected)
-            throw new UnconfirmedStopError(
-              "Chrome Extension 连接中断，无法确认请求已停止。",
-              { cause: error },
-            );
-          if (isRetryableNetworkFailure(error))
-            throw new RetryableRequestError("Saved 请求发生网络错误或超时。", {
-              cause: error,
-            });
-          throw error;
-        }
+        const raw: RawPageResponse = {
+          status: response.status(),
+          contentType,
+          body,
+          finalPath: responseUrl.pathname,
+          retryAfter: headers["retry-after"] ?? null,
+        };
+        if (disconnected)
+          throw new UnconfirmedStopError(
+            "Chrome Extension 连接中断，无法确认请求已停止。",
+          );
         return parseSavedPageResponse(raw);
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (disconnected)
+          throw new UnconfirmedStopError(
+            "Chrome Extension 连接中断，无法确认请求已停止。",
+            { cause: error },
+          );
+        if (isRetryableNetworkFailure(error))
+          throw new RetryableRequestError("Saved 请求发生网络错误或超时。", {
+            cause: error,
+          });
+        throw error;
       } finally {
         signal.removeEventListener("abort", onAbort);
       }
     },
     close,
   };
+}
+
+function isSavedListResponse(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.pathname === "/rest/assets" &&
+      url.searchParams.get("pageSize") === "40" &&
+      url.searchParams.get("orderBy") === "ORDER_BY_CREATE_TIME" &&
+      url.searchParams.get("workspaceKind") === "WORKSPACE_KIND_IMAGINE_ALL"
+    );
+  } catch {
+    return false;
+  }
 }
 
 function safePath(value: string): string {
