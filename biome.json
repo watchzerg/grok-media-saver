@@ -8,6 +8,7 @@
   "files": {
     "includes": [
       "**/*.{ts,tsx,js,mjs,cjs,json,jsonc,css}",
+      "!docs/research/evidence/grok-playwright-extension-demo.ts",
       "!.agents",
       "!.beads",
       "!bun.lock",

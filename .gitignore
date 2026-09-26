@@ -11,3 +11,6 @@ dist/
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# 研究 demo 的本地媒体输出
+/.local/grok-playwright-extension-demo/

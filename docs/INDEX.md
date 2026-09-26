@@ -7,21 +7,34 @@
 | 目录 | 职责 | 当前入口 |
 | --- | --- | --- |
 | `agents/` | agent 工作流与详细规则 | [Beads](agents/issue-tracker.md)、[triage labels](agents/triage-labels.md)、[领域文档规则](agents/domain.md) |
+| `specs/` | 已确认、需要在仓库中维护的产品或配置契约 | [产品目标与首版范围](specs/product-goals.md)、[一期可靠保存规格](specs/phase1-saving.md) |
+| `research/` | 带版本和观察时点的调研、实验与证据 | [归档核心模型与 HTTP 参考](research/core-archive-model-and-http.md)、[Playwright Extension 媒体下载验证](research/2026-09-25-grok-playwright-extension-demo.md) |
+| `development/` | 实现路线、开发、构建、测试与依赖维护说明 | [实现路线图](development/implementation-roadmap.md) |
 
 按需新增以下分类，不预建空目录：
 
-- `specs/`：已确认、需要在仓库中维护的产品或配置契约。
 - `adr/`：重要架构决策的背景、取舍与替代关系。
-- `research/`：带版本或观察时点的调研、实验与证据。
 - `operations/`：部署、发布、备份、恢复与排障指南。
-- `development/`：开发、构建、测试与依赖维护说明。
 
-研究附件可与正文放在一起；附件较多时再使用 `research/evidence/`，由相关正文链接。根目录的 `CONTEXT.md` 与 `ARCHITECTURE.md` 分别在领域术语和架构约束明确后建立。
+研究附件可与正文放在一起；附件较多时再使用 `research/evidence/`，由相关正文链接。根目录的 [ARCHITECTURE.md](../ARCHITECTURE.md)记录已确认架构；[领域词汇](../CONTEXT.md)定义 Saved 列表、Run、Post 工作和完整归档等术语。
+
+## 一期研究入口
+
+以下报告是设计证据与候选方案，不代表实现验收或已批准的技术选择；研究票记录分支、commit 和结论。2026-09-26 用户已取消大视频专项支持和验收，研究中相关建议仅保留历史背景，当前范围以一期规格为准。
+
+- [浏览器连接与资源生命周期](research/phase1-browser-session.md)
+- [Post 身份与媒体解析](research/phase1-post-media-protocol.md)
+- [Post 单媒体、衍生切换与清晰度现场观察](research/post-identity-quality.md)
+- [媒体传输与停止研究（含已取消的大视频历史建议）](research/phase1-media-transfer.md)
+- [所选媒体总长度与内容摘要的现场证据](research/media-completeness-evidence.md)
+- [PostgreSQL 事务与执行器互斥](research/phase1-postgres-boundaries.md)
+- [文件无覆盖发布与恢复](research/phase1-file-publication.md)
 
 ## 权威来源与适用范围
 
-- 本仓库的 issue、spec、执行计划与验收记录以 Beads 为入口，操作规则见 [Beads 约定](agents/issue-tracker.md)。目前尚无产品 spec；建立后在此链接现行来源。
-- `CONTEXT.md` 定义领域词汇，`ARCHITECTURE.md` 定义已接受的实现边界，ADR 记录重要决策及其理由。现有内容与后续变更冲突时，先明确冲突并更新权威来源。
+- 本仓库的 issue、spec、执行计划与验收记录以 Beads 为入口，操作规则见 [Beads 约定](agents/issue-tracker.md)。[产品目标与首版范围](specs/product-goals.md)是已确认目标的权威正文；后续具体规格与计划引用该文档，不重复维护目标正文。
+- `CONTEXT.md` 定义领域词汇，[ARCHITECTURE.md](../ARCHITECTURE.md)定义已接受的模块职责与架构决定，ADR 记录重要决策及其理由。现有内容与后续变更冲突时，先明确冲突并更新权威来源。
+- [一期可靠保存规格](specs/phase1-saving.md)维护一期行为、持久事实、恢复及 Testing Decisions；Beads 决策票保留过程与确认记录，后续实现票引用规格。
 - `research/` 记录观察和证据；研究建议本身不构成产品合同。
 - [README.md](../README.md) 是使用入口；安装、配置和运行步骤应以实际可执行的项目状态为准。
 
