@@ -193,6 +193,49 @@ test("inspect first-page keeps Ctrl+C exit classification when browser cleanup a
   expect(result.cleanupErrors).toHaveLength(1);
 });
 
+test("inspect first-page enters cleanup when an in-flight read ignores cancellation", async () => {
+  const controller = new AbortController();
+  let finishRead!: (page: PageResponse) => void;
+  let readStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    readStarted = resolve;
+  });
+  const pendingRead = new Promise<PageResponse>((resolve) => {
+    finishRead = resolve;
+  });
+  let closeCalls = 0;
+  const resultPromise = inspectFirstPage({
+    signal: controller.signal,
+    connect: async () => ({
+      getFirstPage: async () => {
+        readStarted();
+        return pendingRead;
+      },
+      close: async () => {
+        closeCalls += 1;
+        throw new Error("page close timeout");
+      },
+    }),
+  });
+  await started;
+  controller.abort();
+  try {
+    const outcome = await Promise.race([
+      resultPromise.then(() => "settled"),
+      Bun.sleep(100).then(() => "pending"),
+    ]);
+    expect(outcome).toBe("settled");
+    const result = await resultPromise;
+    expect(result.status).toBe("cancelled");
+    expect(result.cleanupErrors).toEqual([
+      "浏览器清理失败：page close timeout",
+    ]);
+    expect(closeCalls).toBe(1);
+  } finally {
+    finishRead(response({ assets: [] }));
+  }
+});
+
 test("inspect first-page does not retry an unclassified exception", async () => {
   let calls = 0;
   const result = await inspectFirstPage({

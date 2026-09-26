@@ -52,8 +52,18 @@ export async function inspectFirstPage(
         }
         attempt += 1;
         let response: PageResponse;
+        const onAbort = () => rejectStopped(new Error("检查已停止。"));
+        let rejectStopped!: (error: Error) => void;
+        const stopped = new Promise<never>((_, reject) => {
+          rejectStopped = reject;
+        });
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
         try {
-          response = await session.getFirstPage(signal);
+          response = await Promise.race([
+            session.getFirstPage(signal),
+            stopped,
+          ]);
         } catch (error) {
           if (signal.aborted) {
             result = {
@@ -82,6 +92,8 @@ export async function inspectFirstPage(
             message: `读取 Saved 第一页失败：${safeError(error, options.secrets)}`,
           };
           break;
+        } finally {
+          signal.removeEventListener("abort", onAbort);
         }
         if (signal.aborted) {
           result = { ...result, status: "cancelled", message: "检查已停止。" };

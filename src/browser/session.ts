@@ -96,9 +96,6 @@ export async function connectBrowserSession(
     if (failures.length) throw new Error(failures.join("；"));
   };
 
-  const abortOwnedPage = () => {
-    void closeOwnedPage().catch(() => {});
-  };
   let listRouteInstalled = false;
 
   return {
@@ -112,8 +109,17 @@ export async function connectBrowserSession(
         closingPage = undefined;
         listRouteInstalled = false;
       }
-      const onAbort = () => abortOwnedPage();
+      let rejectStopped!: (error: Error) => void;
+      const stopped = new Promise<never>((_, reject) => {
+        rejectStopped = reject;
+      });
+      void stopped.catch(() => {});
+      const onAbort = () => {
+        void closeOwnedPage().catch(() => {});
+        rejectStopped(new Error("检查已停止。"));
+      };
       signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
       let requestTimer: ReturnType<typeof setTimeout> | undefined;
       let preRequestTimer: ReturnType<typeof setTimeout> | undefined;
       let requestTimedOut = false;
@@ -148,7 +154,10 @@ export async function connectBrowserSession(
       try {
         if (signal.aborted) throw new Error("检查已停止。");
         if (!listRouteInstalled) {
-          await page.route(LIST_REQUEST_PATTERN, routeSavedListRequest);
+          await Promise.race([
+            page.route(LIST_REQUEST_PATTERN, routeSavedListRequest),
+            stopped,
+          ]);
           listRouteInstalled = true;
         }
         if (signal.aborted) throw new Error("检查已停止。");
@@ -164,27 +173,25 @@ export async function connectBrowserSession(
           (response) => isSavedListResponse(response.url()),
           { timeout: 0 },
         );
-        const [, response] = await Promise.race([
-          Promise.all([
-            page
-              .goto(savedPageUrl, {
-                waitUntil: "domcontentloaded",
-                timeout: 0,
-              })
-              .then((navigation) => {
-                if (
-                  isAuthenticationPage(page?.url()) ||
-                  isAuthenticationPage(navigation?.url())
-                )
-                  throw new AuthenticationBlockedError(
-                    navigation?.status() ?? 0,
-                  );
-                return navigation;
-              }),
-            responsePromise,
-          ]),
+        const navigation = page
+          .goto(savedPageUrl, {
+            waitUntil: "domcontentloaded",
+            timeout: 0,
+          })
+          .then((navigation) => {
+            if (
+              isAuthenticationPage(page?.url()) ||
+              isAuthenticationPage(navigation?.url())
+            )
+              throw new AuthenticationBlockedError(navigation?.status() ?? 0);
+            return responsePromise;
+          });
+        const response = await Promise.race([
+          responsePromise,
+          navigation,
           preRequestDeadline,
           deadline,
+          stopped,
         ]);
         const responseUrl = new URL(response.url());
         const headers = response.headers();
@@ -192,9 +199,13 @@ export async function connectBrowserSession(
         let body: unknown = null;
         if (contentType.toLowerCase().includes("json")) {
           try {
-            body = await Promise.race([response.json(), deadline]);
+            body = await Promise.race([response.json(), deadline, stopped]);
           } catch (error) {
-            if (requestTimedOut || isRetryableNetworkFailure(error))
+            if (
+              signal.aborted ||
+              requestTimedOut ||
+              isRetryableNetworkFailure(error)
+            )
               throw error;
             body = null;
           }
@@ -208,6 +219,8 @@ export async function connectBrowserSession(
             responseUrl.pathname,
           retryAfter: headers["retry-after"] ?? null,
         };
+        if (isAuthenticationPage(page?.url()))
+          throw new AuthenticationBlockedError(0);
         if (disconnected)
           throw new UnconfirmedStopError(
             "Chrome Extension 连接中断，无法确认请求已停止。",
