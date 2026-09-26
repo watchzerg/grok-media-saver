@@ -173,10 +173,14 @@ export function normalizePostId(value: string): string | undefined {
 }
 
 function isSupportedMediaUrl(value: string): boolean {
+  if (!value.trim()) return false;
   try {
-    const url = new URL(value);
+    const url = new URL(value, "https://assets.grok.com/");
     return (
       url.protocol === "https:" &&
+      !url.username &&
+      !url.password &&
+      !url.port &&
       ["assets.grok.com", "videos.grok.com"].includes(url.hostname)
     );
   } catch {

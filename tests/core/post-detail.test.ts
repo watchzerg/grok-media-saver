@@ -87,6 +87,34 @@ test("video detail uses the next quality only when the higher field is absent", 
   ).toMatchObject({ kind: "post", selection: { quality: "original" } });
 });
 
+test("post detail resolves relative media keys against the approved media origin", () => {
+  expect(
+    parse({
+      assetId: postId,
+      mimeType: "image/jpeg",
+      key: "image/2026/09/example.jpg",
+    }),
+  ).toMatchObject({ kind: "post", selection: { quality: "image" } });
+  expect(
+    parse({
+      assetId: postId,
+      mimeType: "video/mp4",
+      key: "video/base.mp4",
+      hdKey: "video/720.mp4",
+    }),
+  ).toMatchObject({ kind: "post", selection: { quality: "720p" } });
+});
+
+test("post detail rejects relative media keys that resolve outside supported HTTPS hosts", () => {
+  expect(
+    parse({
+      assetId: postId,
+      mimeType: "image/jpeg",
+      key: "//untrusted.example/image.jpg",
+    }).kind,
+  ).toBe("unknown");
+});
+
 test("inspect post calls only the requested detail, reports the selection, and closes", async () => {
   let detailCalls = 0;
   let closeCalls = 0;
