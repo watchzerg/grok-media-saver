@@ -4,115 +4,131 @@ import { parsePostDetailResponse } from "../../src/grok/adapter";
 
 const postId = "123e4567-e89b-42d3-a456-426614174000";
 
-function parse(body: unknown) {
-  return parsePostDetailResponse(postId, {
-    status: 200,
-    contentType: "application/json",
-    body,
-    finalPath: `/rest/assets/${postId}`,
+function inspectBody(body: unknown) {
+  return inspectPost(postId, {
+    connect: async () => ({
+      getPostDetail: async (requestedId) =>
+        parsePostDetailResponse(requestedId, {
+          status: 200,
+          contentType: "application/json",
+          body,
+          finalPath: `/rest/assets/${requestedId}`,
+        }),
+      close: async () => {},
+    }),
   });
 }
 
-test("post detail requires a matching identity and selects the image root key", () => {
+test("inspect post requires a matching identity and selects the image root key", async () => {
   expect(
-    parse({
+    await inspectBody({
       assetId: postId,
       mimeType: "image/jpeg",
       key: "https://assets.grok.com/image.jpg",
       auxKeys: { "original-image": "https://assets.grok.com/other.jpg" },
     }),
-  ).toEqual({
-    kind: "post",
+  ).toMatchObject({
+    status: "ok",
     selection: { assetId: postId, mimeType: "image/jpeg", quality: "image" },
   });
 });
 
-test("post detail rejects a mismatched identity and unknown wrappers", () => {
+test("inspect post does not treat auxiliary original-image media as the image root", async () => {
   expect(
-    parse({
+    await inspectBody({
+      assetId: postId,
+      mimeType: "image/jpeg",
+      auxKeys: { "original-image": "https://assets.grok.com/other.jpg" },
+    }),
+  ).toMatchObject({ status: "failed" });
+});
+
+test("inspect post rejects a mismatched identity and unknown wrappers", async () => {
+  expect(
+    await inspectBody({
       assetId: "ffffffff-0000-0000-0000-000000000001",
       mimeType: "image/jpeg",
       key: "https://assets.grok.com/a.jpg",
-    }).kind,
-  ).toBe("unknown");
+    }),
+  ).toMatchObject({ status: "failed" });
   expect(
-    parse({
+    await inspectBody({
       assetDetail: {
         assetId: postId,
         mimeType: "image/jpeg",
         key: "https://assets.grok.com/a.jpg",
       },
-    }).kind,
-  ).toBe("unknown");
+    }),
+  ).toMatchObject({ status: "failed" });
 });
 
-test("video detail selects the highest present quality and fails malformed higher candidates", () => {
+test("inspect post selects the highest present quality and fails malformed higher candidates", async () => {
   expect(
-    parse({
+    await inspectBody({
       assetId: postId,
       mimeType: "video/mp4",
       key: "https://videos.grok.com/base.mp4",
       hdKey: "https://videos.grok.com/720.mp4",
       hd1080Key: "https://videos.grok.com/1080.mp4",
     }),
-  ).toEqual({
-    kind: "post",
+  ).toMatchObject({
+    status: "ok",
     selection: { assetId: postId, mimeType: "video/mp4", quality: "1080p" },
   });
   expect(
-    parse({
+    await inspectBody({
       assetId: postId,
       mimeType: "video/mp4",
       key: "https://videos.grok.com/base.mp4",
       hd1080Key: null,
-    }).kind,
-  ).toBe("unknown");
+    }),
+  ).toMatchObject({ status: "failed" });
 });
 
-test("video detail uses the next quality only when the higher field is absent", () => {
+test("inspect post uses the next quality only when the higher field is absent", async () => {
   expect(
-    parse({
+    await inspectBody({
       assetId: postId,
       mimeType: "video/mp4",
       key: "https://videos.grok.com/base.mp4",
       hdKey: "https://videos.grok.com/720.mp4",
     }),
-  ).toMatchObject({ kind: "post", selection: { quality: "720p" } });
+  ).toMatchObject({ status: "ok", selection: { quality: "720p" } });
   expect(
-    parse({
+    await inspectBody({
       assetId: postId,
       mimeType: "video/mp4",
       key: "https://videos.grok.com/base.mp4",
     }),
-  ).toMatchObject({ kind: "post", selection: { quality: "original" } });
+  ).toMatchObject({ status: "ok", selection: { quality: "original" } });
 });
 
-test("post detail resolves relative media keys against the approved media origin", () => {
+test("inspect post resolves relative media keys against the approved media origin", async () => {
   expect(
-    parse({
+    await inspectBody({
       assetId: postId,
       mimeType: "image/jpeg",
       key: "image/2026/09/example.jpg",
     }),
-  ).toMatchObject({ kind: "post", selection: { quality: "image" } });
+  ).toMatchObject({ status: "ok", selection: { quality: "image" } });
   expect(
-    parse({
+    await inspectBody({
       assetId: postId,
       mimeType: "video/mp4",
       key: "video/base.mp4",
       hdKey: "video/720.mp4",
     }),
-  ).toMatchObject({ kind: "post", selection: { quality: "720p" } });
+  ).toMatchObject({ status: "ok", selection: { quality: "720p" } });
 });
 
-test("post detail rejects relative media keys that resolve outside supported HTTPS hosts", () => {
+test("inspect post rejects relative media keys that resolve outside supported HTTPS hosts", async () => {
   expect(
-    parse({
+    await inspectBody({
       assetId: postId,
       mimeType: "image/jpeg",
       key: "//untrusted.example/image.jpg",
-    }).kind,
-  ).toBe("unknown");
+    }),
+  ).toMatchObject({ status: "failed" });
 });
 
 test("inspect post calls only the requested detail, reports the selection, and closes", async () => {
