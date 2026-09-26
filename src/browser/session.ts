@@ -100,10 +100,6 @@ export async function connectBrowserSession(
     void closeOwnedPage().catch(() => {});
   };
   let listRouteInstalled = false;
-  const routeSavedListRequest = async (route: PageRouteLike) => {
-    if (isSavedListResponse(route.request().url())) onRequestStart();
-    await route.continue();
-  };
 
   return {
     cleanupNotices,
@@ -111,25 +107,71 @@ export async function connectBrowserSession(
       if (closed || disconnected)
         throw new Error("Chrome Extension 连接已断开。");
       if (signal.aborted) throw new Error("检查已停止。");
-      page ??= await context.newPage();
+      if (!page || page.isClosed()) {
+        page = await context.newPage();
+        closingPage = undefined;
+        listRouteInstalled = false;
+      }
       const onAbort = () => abortOwnedPage();
       signal.addEventListener("abort", onAbort, { once: true });
+      let requestTimer: ReturnType<typeof setTimeout> | undefined;
+      let requestTimedOut = false;
+      let rejectDeadline!: (error: Error) => void;
+      const deadline = new Promise<never>((_, reject) => {
+        rejectDeadline = reject;
+      });
+      const routeSavedListRequest = async (route: PageRouteLike) => {
+        if (signal.aborted || requestTimedOut) {
+          await route.abort();
+          return;
+        }
+        if (isSavedListResponse(route.request().url())) {
+          onRequestStart();
+          if (!requestTimer)
+            requestTimer = setTimeout(() => {
+              requestTimedOut = true;
+              const error = new Error("Saved 请求超过 30 秒总期限。");
+              error.name = "TimeoutError";
+              rejectDeadline(error);
+            }, API_TIMEOUT_MS);
+        }
+        if (signal.aborted) {
+          await route.abort();
+          return;
+        }
+        await route.continue();
+      };
       try {
         if (signal.aborted) throw new Error("检查已停止。");
         if (!listRouteInstalled) {
           await page.route(LIST_REQUEST_PATTERN, routeSavedListRequest);
           listRouteInstalled = true;
         }
+        if (signal.aborted) throw new Error("检查已停止。");
         const responsePromise = page.waitForResponse(
           (response) => isSavedListResponse(response.url()),
           { timeout: API_TIMEOUT_MS },
         );
-        const [, response] = await Promise.all([
-          page.goto(savedPageUrl, {
-            waitUntil: "domcontentloaded",
-            timeout: API_TIMEOUT_MS,
-          }),
-          responsePromise,
+        const [, response] = await Promise.race([
+          Promise.all([
+            page
+              .goto(savedPageUrl, {
+                waitUntil: "domcontentloaded",
+                timeout: API_TIMEOUT_MS,
+              })
+              .then((navigation) => {
+                if (
+                  isAuthenticationPage(page?.url()) ||
+                  isAuthenticationPage(navigation?.url())
+                )
+                  throw new AuthenticationBlockedError(
+                    navigation?.status() ?? 0,
+                  );
+                return navigation;
+              }),
+            responsePromise,
+          ]),
+          deadline,
         ]);
         const responseUrl = new URL(response.url());
         const headers = response.headers();
@@ -137,8 +179,10 @@ export async function connectBrowserSession(
         let body: unknown = null;
         if (contentType.toLowerCase().includes("json")) {
           try {
-            body = await response.json();
-          } catch {
+            body = await Promise.race([response.json(), deadline]);
+          } catch (error) {
+            if (requestTimedOut || isRetryableNetworkFailure(error))
+              throw error;
             body = null;
           }
         }
@@ -146,32 +190,103 @@ export async function connectBrowserSession(
           status: response.status(),
           contentType,
           body,
-          finalPath: responseUrl.pathname,
+          finalPath:
+            authenticationRedirectPath(headers.location, response.url()) ??
+            responseUrl.pathname,
           retryAfter: headers["retry-after"] ?? null,
         };
         if (disconnected)
           throw new UnconfirmedStopError(
             "Chrome Extension 连接中断，无法确认请求已停止。",
           );
-        return parseSavedPageResponse(raw);
+        const parsed = parseSavedPageResponse(raw);
+        if (
+          parsed.kind === "temporary" ||
+          authenticationRedirectPath(headers.location, response.url())
+        ) {
+          try {
+            await closeOwnedPage();
+          } catch (cleanupError) {
+            throw new UnconfirmedStopError(
+              "Saved 请求停止无法确认，已禁止继续。",
+              { cause: cleanupError },
+            );
+          }
+        }
+        return parsed;
       } catch (error) {
         if (signal.aborted) throw error;
+        if (
+          error instanceof AuthenticationBlockedError ||
+          isAuthenticationPage(page?.url())
+        ) {
+          try {
+            await closeOwnedPage();
+          } catch (cleanupError) {
+            throw new UnconfirmedStopError(
+              "登录阻挡后 Saved 请求停止无法确认。",
+              { cause: cleanupError },
+            );
+          }
+          return {
+            kind: "blocked",
+            status:
+              error instanceof AuthenticationBlockedError ? error.status : 0,
+            reason: "authentication",
+          };
+        }
         if (disconnected)
           throw new UnconfirmedStopError(
             "Chrome Extension 连接中断，无法确认请求已停止。",
             { cause: error },
           );
-        if (isRetryableNetworkFailure(error))
+        if (isRetryableNetworkFailure(error)) {
+          try {
+            await closeOwnedPage();
+          } catch (cleanupError) {
+            throw new UnconfirmedStopError(
+              "Saved 请求停止无法确认，已禁止重试。",
+              { cause: cleanupError },
+            );
+          }
           throw new RetryableRequestError("Saved 请求发生网络错误或超时。", {
             cause: error,
           });
+        }
         throw error;
       } finally {
+        if (requestTimer) clearTimeout(requestTimer);
         signal.removeEventListener("abort", onAbort);
       }
     },
     close,
   };
+}
+
+class AuthenticationBlockedError extends Error {
+  constructor(readonly status: number) {
+    super("登录或 challenge 页面阻挡 Saved 检查。");
+  }
+}
+
+function isAuthenticationPage(value: string | undefined): boolean {
+  return (
+    value !== undefined &&
+    /\/(?:login|signin|challenge|tos-gate)(?:\/|$)/i.test(safePath(value))
+  );
+}
+
+function authenticationRedirectPath(
+  location: string | undefined,
+  base: string,
+): string | undefined {
+  if (!location) return undefined;
+  try {
+    const path = new URL(location, base).pathname;
+    return isAuthenticationPage(`https://grok.com${path}`) ? path : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function isSavedListResponse(value: string): boolean {

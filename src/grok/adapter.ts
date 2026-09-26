@@ -2,7 +2,12 @@ export type SavedAsset = { assetId: string; mimeType: string };
 
 export type PageResponse =
   | { kind: "page"; assets: SavedAsset[]; hasNextPage: boolean }
-  | { kind: "blocked"; status: number; retryAfter?: string | null }
+  | {
+      kind: "blocked";
+      status: number;
+      reason?: "authentication";
+      retryAfter?: string | null;
+    }
   | { kind: "temporary"; status: number }
   | { kind: "unavailable"; status: number }
   | { kind: "unknown" };
@@ -34,14 +39,19 @@ const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 export function parseSavedPageResponse(
   response: RawPageResponse,
 ): PageResponse {
+  const authenticationPage =
+    /\/(?:login|signin|challenge|tos-gate)(?:\/|$)/i.test(response.finalPath);
   if (
     response.status === 401 ||
     response.status === 429 ||
-    /\/(?:login|signin|challenge)(?:\/|$)/i.test(response.finalPath)
+    authenticationPage
   ) {
     return {
       kind: "blocked",
       status: response.status,
+      ...(response.status === 401 || authenticationPage
+        ? { reason: "authentication" as const }
+        : {}),
       retryAfter: response.retryAfter,
     };
   }

@@ -91,10 +91,13 @@ export async function inspectFirstPage(
           const wait = response.retryAfter
             ? `；服务端建议等待 ${response.retryAfter}`
             : "";
+          const reason =
+            response.reason === "authentication" ? "登录或 challenge" : "";
+          const status = response.status ? `HTTP ${response.status}` : "";
           result = {
             ...result,
             status: "blocked",
-            message: `Saved 请求被阻挡（HTTP ${response.status}）${wait}。`,
+            message: `Saved 请求被阻挡（${[reason, status].filter(Boolean).join("，")}）${wait}。`,
           };
           break;
         }

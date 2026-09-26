@@ -31,7 +31,7 @@ type PageLike = {
   goto(
     url: string,
     options: { waitUntil: "domcontentloaded"; timeout: number },
-  ): Promise<unknown>;
+  ): Promise<PageResponseLike | null>;
   waitForResponse(
     predicate: (response: PageResponseLike) => boolean,
     options: { timeout: number },
@@ -42,6 +42,7 @@ type PageLike = {
 
 type PageRouteLike = {
   request(): { url(): string };
+  abort(): Promise<void>;
   continue(): Promise<void>;
 };
 

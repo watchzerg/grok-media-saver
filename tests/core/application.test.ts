@@ -7,6 +7,7 @@ import {
 import {
   parseSavedPageResponse,
   RetryableRequestError,
+  UnconfirmedStopError,
 } from "../../src/grok/adapter";
 
 const first = {
@@ -82,6 +83,42 @@ test("inspect first-page classifies blocking failures and does not retry them", 
     }),
   });
   expect(result.status).toBe("blocked");
+  expect(calls).toBe(1);
+});
+
+test("inspect first-page blocks a login redirect without retrying", async () => {
+  let calls = 0;
+  const result = await inspectFirstPage({
+    connect: async () => ({
+      getFirstPage: async () => {
+        calls += 1;
+        return parseSavedPageResponse({
+          status: 302,
+          contentType: "text/html",
+          body: null,
+          finalPath: "/login",
+        });
+      },
+      close: async () => {},
+    }),
+  });
+  expect(result.status).toBe("blocked");
+  expect(result.message).toContain("登录或 challenge");
+  expect(calls).toBe(1);
+});
+
+test("inspect first-page does not retry when request stop is unconfirmed", async () => {
+  let calls = 0;
+  const result = await inspectFirstPage({
+    connect: async () => ({
+      getFirstPage: async () => {
+        calls += 1;
+        throw new UnconfirmedStopError("request stop unconfirmed");
+      },
+      close: async () => {},
+    }),
+  });
+  expect(result.status).toBe("failed");
   expect(calls).toBe(1);
 });
 
