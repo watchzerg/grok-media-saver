@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,10 @@ import {
   retryUnfinishedPosts,
 } from "../../src/application-runtime";
 import { readDatabaseConfig, readSaveConfig } from "../../src/config";
+import {
+  PublishConflictError,
+  publishIntent,
+} from "../../src/files/publish-intent";
 import { databaseEnv, testSql, useIsolatedPostgres } from "../helpers/postgres";
 
 useIsolatedPostgres();
@@ -311,6 +316,71 @@ test("retry continues after a Post detail network failure exhausts its retry", a
   }
 });
 
+test.each([
+  {
+    caseName: "initial detail and browser close",
+    mediaRetry: false,
+    closeFailure: true,
+  },
+  { caseName: "media retry detail", mediaRetry: true, closeFailure: false },
+  {
+    caseName: "media retry detail and browser close",
+    mediaRetry: true,
+    closeFailure: true,
+  },
+])(
+  "retry records $caseName as a failed Post with accurate remaining count",
+  async ({ mediaRetry, closeFailure }) => {
+    await resetSchema();
+    const root = await mkdtemp(join(tmpdir(), "gms-retry-detail-failure-"));
+    const first = "123e4567-e89b-42d3-a456-426614174000";
+    const second = "123e4567-e89b-42d3-a456-426614174001";
+    const detailLog = join(root, "details.txt");
+    try {
+      await testSql`INSERT INTO post_work (post_id,status) VALUES (${first},'pending'),(${second},'pending')`;
+      const result = await runFakeRetry({
+        ...databaseEnv,
+        GROK_ARCHIVE_DIR: root,
+        GMS_TEST_MEDIA: "1",
+        GMS_TEST_DETAIL_IDS: detailLog,
+        ...(mediaRetry
+          ? { GMS_TEST_MEDIA_RETRY_DETAIL_FAILURE_ID: first }
+          : { GMS_TEST_NETWORK_FAILURE_ID: first }),
+        ...(closeFailure ? { GMS_TEST_CLOSE_FAILURE: "1" } : {}),
+      });
+      expect(result.exitCode, result.stderr).toBe(1);
+      expect(result.stderr).toContain(
+        closeFailure
+          ? "已保存 0，失败 1，未处理 1"
+          : "已保存 1，失败 1，未处理 0",
+      );
+      if (closeFailure) expect(result.stderr).toContain("浏览器清理失败");
+      expect((await readFile(detailLog, "utf8")).trim().split("\n")).toEqual(
+        mediaRetry
+          ? [first, first, first, second].slice(0, closeFailure ? 3 : 4)
+          : [first, first, second].slice(0, closeFailure ? 2 : 3),
+      );
+      const [run] = await testSql<{ id: string; summary: unknown }[]>`
+      SELECT id::text AS id,summary FROM runs WHERE command='retry'`;
+      const [work] = await testSql<
+        { status: string; last_run_id: string; last_error: string }[]
+      >`
+      SELECT status,last_run_id::text AS last_run_id,last_error
+      FROM post_work WHERE post_id=${first}`;
+      expect(run?.summary).toEqual({
+        saved: closeFailure ? 0 : 1,
+        failed: 1,
+        unprocessed: closeFailure ? 1 : 0,
+      });
+      expect(work?.status).toBe("failed");
+      expect(work?.last_run_id).toBe(run?.id);
+      expect(work?.last_error).toContain("详情");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
 test("SIGINT after a nonempty retry snapshot records known unprocessed counts", async () => {
   await resetSchema();
   const root = await mkdtemp(join(tmpdir(), "gms-retry-early-stop-"));
@@ -344,6 +414,40 @@ test("SIGINT after a nonempty retry snapshot records known unprocessed counts", 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test.each([
+  { response: "unavailable", blocked: false },
+  { response: "blocked", blocked: true },
+])(
+  "retry counts a returned $response result before browser cleanup stops it",
+  async ({ blocked }) => {
+    await resetSchema();
+    const root = await mkdtemp(join(tmpdir(), "gms-retry-return-cleanup-"));
+    const first = "123e4567-e89b-42d3-a456-426614174000";
+    const second = "123e4567-e89b-42d3-a456-426614174001";
+    try {
+      await testSql`INSERT INTO post_work (post_id,status) VALUES (${first},'pending'),(${second},'pending')`;
+      const result = await runFakeRetry({
+        ...databaseEnv,
+        GROK_ARCHIVE_DIR: root,
+        GMS_TEST_MEDIA: "1",
+        GMS_TEST_CLOSE_FAILURE: "1",
+        [blocked ? "GMS_TEST_BLOCKED_ID" : "GMS_TEST_UNAVAILABLE_ID"]: first,
+      });
+      expect(result.exitCode, result.stderr).toBe(1);
+      expect(result.stderr).toContain("已保存 0，失败 1，未处理 1");
+      expect(result.stderr).toContain("浏览器清理失败");
+      const [run] = await testSql<{ summary: unknown }[]>`
+      SELECT summary FROM runs WHERE command='retry'`;
+      expect(run?.summary).toEqual({ saved: 0, failed: 1, unprocessed: 1 });
+      const [later] = await testSql<{ last_run_id: string | null }[]>`
+      SELECT last_run_id FROM post_work WHERE post_id=${second}`;
+      expect(later?.last_run_id).toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test("retry continues after a finalizing Post conflicts with its published file", async () => {
   await resetSchema();
@@ -382,6 +486,94 @@ test("retry continues after a finalizing Post conflicts with its published file"
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test.each(["different bytes", "directory", "symlink"])(
+  "publish conflict after EEXIST preserves intent and classifies %s",
+  async (kind) => {
+    const root = await mkdtemp(join(tmpdir(), "gms-retry-publish-race-"));
+    const postId = "123e4567-e89b-42d3-a456-426614174000";
+    const bytes = Buffer.from("owned publication");
+    const sha256 = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+    const relativePath = `${postId}/${sha256}.png`;
+    const finalPath = join(root, relativePath);
+    const tempName = ".retry-race.part";
+    try {
+      await mkdir(join(root, postId));
+      await writeFile(join(root, postId, tempName), bytes);
+      await expect(
+        publishIntent(
+          root,
+          postId,
+          {
+            mimeType: "image/png",
+            sha256,
+            relativePath,
+            tempName,
+            publishBytes: String(bytes.length),
+          },
+          new AbortController().signal,
+          (stage) => {
+            if (stage !== "发布文件") return;
+            if (kind === "different bytes")
+              writeFileSync(finalPath, "external content");
+            else if (kind === "directory") mkdirSync(finalPath);
+            else symlinkSync(tempName, finalPath);
+          },
+        ),
+      ).rejects.toBeInstanceOf(PublishConflictError);
+      expect(await readFile(join(root, postId, tempName))).toEqual(bytes);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.each([{ closeFailure: false }, { closeFailure: true }])(
+  "retry counts an ordinary publish conflict with browser cleanup failure=$closeFailure",
+  async ({ closeFailure }) => {
+    await resetSchema();
+    const root = await mkdtemp(join(tmpdir(), "gms-retry-conflict-cleanup-"));
+    const first = "123e4567-e89b-42d3-a456-426614174000";
+    const second = "123e4567-e89b-42d3-a456-426614174001";
+    try {
+      await testSql`INSERT INTO post_work (post_id,status) VALUES (${first},'pending'),(${second},'pending')`;
+      const result = await runFakeRetry({
+        ...databaseEnv,
+        GROK_ARCHIVE_DIR: root,
+        GMS_TEST_MEDIA: "1",
+        GMS_TEST_CONFLICT_ID: first,
+        ...(closeFailure ? { GMS_TEST_CLOSE_FAILURE: "1" } : {}),
+      });
+      expect(result.exitCode, result.stderr).toBe(1);
+      expect(result.stderr).toContain(
+        closeFailure
+          ? "已保存 0，失败 1，未处理 1"
+          : "已保存 1，失败 1，未处理 0",
+      );
+      const [run] = await testSql<{ summary: unknown }[]>`
+        SELECT summary FROM runs WHERE command='retry'`;
+      expect(run?.summary).toEqual({
+        saved: closeFailure ? 0 : 1,
+        failed: 1,
+        unprocessed: closeFailure ? 1 : 0,
+      });
+      const [firstWork] = await testSql<
+        { status: string; publish_temp_name: string | null }[]
+      >`
+        SELECT status,publish_temp_name FROM post_work WHERE post_id=${first}`;
+      expect(firstWork?.status).toBe("finalizing");
+      expect(firstWork?.publish_temp_name).not.toBeNull();
+      const [later] = await testSql<
+        { status: string; last_run_id: string | null }[]
+      >`
+        SELECT status,last_run_id FROM post_work WHERE post_id=${second}`;
+      expect(later?.status).toBe(closeFailure ? "pending" : "saved");
+      if (closeFailure) expect(later?.last_run_id).toBeNull();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test("retry continues after an owned temp conflicts with its publish intent", async () => {
   await resetSchema();

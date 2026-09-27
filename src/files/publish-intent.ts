@@ -161,10 +161,18 @@ export async function publishIntent(
       bytes,
       work.sha256 as string,
     );
+    if (
+      final.status === "mismatch" ||
+      final.status === "directory" ||
+      final.status === "symlink"
+    )
+      throw new PublishConflictError("正式文件与发布意图冲突，现场已保留。");
+    if (final.status === "failed") throw new Error(final.reason);
     if (final.status !== "ok")
       throw new Error("正式文件发布后核验失败，发布意图已保留。");
     onStage?.("正式文件已发布");
   }
+  if (final.status === "failed") throw new Error(final.reason);
   if (final.status !== "ok")
     throw new PublishConflictError("正式文件与发布意图冲突，现场已保留。");
   if (signal.aborted && !publicationStarted)

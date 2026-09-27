@@ -119,28 +119,7 @@ export async function archivePost({
   } else {
     await store.assertLock();
     onStage?.("读取当前详情");
-    let detail: PostResponse;
-    for (let attempt = 1; ; attempt += 1) {
-      if (signal.aborted) throw new Error("保存已停止。");
-      try {
-        detail = await getDetail(signal);
-      } catch (error) {
-        if (signal.aborted) throw new Error("保存已停止。");
-        if (error instanceof RetryableRequestError && attempt >= 2) {
-          await store.assertLock();
-          await store.failUnreadableDetail(postId, runId);
-          throw error;
-        }
-        if (!(error instanceof RetryableRequestError)) throw error;
-        await waitBeforeRetry(signal);
-        await store.assertLock();
-        continue;
-      }
-      if (signal.aborted) throw new Error("保存已停止。");
-      if (detail.kind !== "temporary" || attempt >= 2) break;
-      await waitBeforeRetry(signal);
-      await store.assertLock();
-    }
+    const detail = await readCurrentDetail();
     if (detail.kind !== "post") {
       if (detail.kind === "blocked") {
         const reason =
@@ -249,7 +228,7 @@ export async function archivePost({
         if (error instanceof RetryableMediaError && attempt < 2) {
           await waitBeforeRetry(signal);
           await store.assertLock();
-          const next = await getDetail(signal);
+          const next = await readCurrentDetail();
           if (next.kind === "blocked") {
             result.status = "blocked";
             result.message = "Post 详情重读被阻挡。";
@@ -311,6 +290,31 @@ export async function archivePost({
       result.status = "ok";
       result.message = "Post 保存完成。";
       return;
+    }
+  }
+
+  async function readCurrentDetail(): Promise<PostResponse> {
+    for (let attempt = 1; ; attempt += 1) {
+      if (signal.aborted) throw new Error("保存已停止。");
+      let detail: PostResponse;
+      try {
+        detail = await getDetail(signal);
+      } catch (error) {
+        if (signal.aborted) throw new Error("保存已停止。");
+        if (error instanceof RetryableRequestError && attempt >= 2) {
+          await store.assertLock();
+          await store.failUnreadableDetail(postId, runId);
+          throw error;
+        }
+        if (!(error instanceof RetryableRequestError)) throw error;
+        await waitBeforeRetry(signal);
+        await store.assertLock();
+        continue;
+      }
+      if (signal.aborted) throw new Error("保存已停止。");
+      if (detail.kind !== "temporary" || attempt >= 2) return detail;
+      await waitBeforeRetry(signal);
+      await store.assertLock();
     }
   }
 }

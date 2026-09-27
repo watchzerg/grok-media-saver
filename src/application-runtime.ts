@@ -310,20 +310,22 @@ export async function retryUnfinishedPosts(
                   } catch (error) {
                     if (runWriteUnknown) throw error;
                     if (
-                      !signal?.aborted &&
-                      result.cleanupErrors.length === 0 &&
-                      (error instanceof RetryableRequestError ||
-                        error instanceof PublishConflictError ||
-                        error instanceof KnownSaveConflict)
+                      error instanceof RetryableRequestError ||
+                      error instanceof PublishConflictError ||
+                      error instanceof KnownSaveConflict
                     ) {
                       counts.unprocessed -= 1;
                       counts.failed += 1;
                       postErrors.push(
                         `Post ${target.postId} 失败：${safeSaveError(error, saveConfig)}`,
                       );
-                      continue;
+                      if (!signal?.aborted && result.cleanupErrors.length === 0)
+                        continue;
                     }
-                    stopReason = safeSaveError(error, saveConfig);
+                    stopReason = [
+                      safeSaveError(error, saveConfig),
+                      ...result.cleanupErrors,
+                    ].join(" ");
                     break;
                   }
                   counts.unprocessed -= 1;

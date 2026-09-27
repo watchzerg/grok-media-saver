@@ -1,5 +1,6 @@
 import { mock } from "bun:test";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   parsePostDetailResponse,
   RetryableRequestError,
@@ -8,8 +9,10 @@ import {
 mock.module("../../src/browser/session.ts", () => ({
   connectBrowserSession: async (_url: string, requestStarted: () => void) => {
     let attempts = 0;
+    let currentPostId = "";
     return {
       getPostDetail: async (postId: string) => {
+        currentPostId = postId;
         requestStarted();
         attempts += 1;
         if (process.env.GMS_TEST_DETAIL_IDS)
@@ -23,7 +26,11 @@ mock.module("../../src/browser/session.ts", () => ({
           process.kill(process.pid, "SIGINT");
           await Bun.sleep(20);
         }
-        if (process.env.GMS_TEST_NETWORK_FAILURE_ID === postId)
+        if (
+          process.env.GMS_TEST_NETWORK_FAILURE_ID === postId ||
+          (process.env.GMS_TEST_MEDIA_RETRY_DETAIL_FAILURE_ID === postId &&
+            attempts > 1)
+        )
           throw new RetryableRequestError("simulated detail network failure");
         return parsePostDetailResponse(postId, {
           status:
@@ -65,6 +72,18 @@ mock.module("../../src/browser/session.ts", () => ({
               onResponse: (headers: unknown) => Promise<void>,
               onChunk: (chunk: Uint8Array) => Promise<void>,
             ) => {
+              if (
+                process.env.GMS_TEST_MEDIA_RETRY_DETAIL_FAILURE_ID ===
+                currentPostId
+              ) {
+                await onResponse({
+                  status: 503,
+                  contentType: "image/png",
+                  contentLength: "1",
+                  contentEncoding: null,
+                });
+                return;
+              }
               const video = String(
                 (_selection as { key?: string }).key ?? "",
               ).includes(".mp4");
@@ -74,6 +93,19 @@ mock.module("../../src/browser/session.ts", () => ({
                   : "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489",
                 "hex",
               );
+              if (process.env.GMS_TEST_CONFLICT_ID === currentPostId) {
+                const digest = new Bun.CryptoHasher("sha256")
+                  .update(image)
+                  .digest("hex");
+                writeFileSync(
+                  join(
+                    process.env.GROK_ARCHIVE_DIR as string,
+                    currentPostId,
+                    `${digest}.${video ? "mp4" : "png"}`,
+                  ),
+                  "external conflict",
+                );
+              }
               await onResponse({
                 status: 200,
                 contentType: video ? "video/mp4" : "image/png",
