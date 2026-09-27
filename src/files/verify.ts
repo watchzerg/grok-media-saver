@@ -11,11 +11,16 @@ export type ArchiveCheck =
   | { status: "mismatch" }
   | { status: "failed"; reason: string };
 
+export type ArchiveFileCloser = (
+  file: Awaited<ReturnType<typeof open>>,
+) => Promise<void>;
+
 export async function checkArchiveFile(
   archiveRoot: string,
   relativePath: string,
   expectedBytes: number,
   expectedSha256: string,
+  closeFile: ArchiveFileCloser = (file) => file.close(),
 ): Promise<ArchiveCheck> {
   if (isAbsolute(relativePath))
     return { status: "failed", reason: "保存路径不是相对路径。" };
@@ -36,21 +41,6 @@ export async function checkArchiveFile(
     if (errorCode(error) === "ENOENT") return { status: "missing" };
     return { status: "failed", reason: "无法访问当前归档路径。" };
   }
-  let targetRealPath: string;
-  try {
-    targetRealPath = await realpath(target);
-  } catch (error) {
-    if (errorCode(error) === "ENOENT") return { status: "missing" };
-    return { status: "failed", reason: "无法访问归档文件。" };
-  }
-  const physicalRelative = relative(rootRealPath, targetRealPath);
-  if (
-    physicalRelative === ".." ||
-    physicalRelative.startsWith(`..${sep}`) ||
-    isAbsolute(physicalRelative)
-  )
-    return { status: "failed", reason: "保存路径超出当前归档目录。" };
-
   let details: Awaited<ReturnType<typeof lstat>>;
   try {
     details = await lstat(target);
@@ -63,6 +53,20 @@ export async function checkArchiveFile(
   if (!details.isFile())
     return { status: "failed", reason: "归档路径不是普通文件。" };
 
+  let targetRealPath: string;
+  try {
+    targetRealPath = await realpath(target);
+  } catch {
+    return { status: "failed", reason: "无法访问归档文件。" };
+  }
+  const physicalRelative = relative(rootRealPath, targetRealPath);
+  if (
+    physicalRelative === ".." ||
+    physicalRelative.startsWith(`..${sep}`) ||
+    isAbsolute(physicalRelative)
+  )
+    return { status: "failed", reason: "保存路径超出当前归档目录。" };
+
   let file: Awaited<ReturnType<typeof open>>;
   try {
     file = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -71,24 +75,36 @@ export async function checkArchiveFile(
     if (errorCode(error) === "ELOOP") return { status: "symlink" };
     return { status: "failed", reason: "无法读取归档文件。" };
   }
+  let result: ArchiveCheck;
   try {
     const opened = await file.stat();
-    if (!opened.isFile()) return { status: "directory" };
-    if (opened.size !== expectedBytes) return { status: "mismatch" };
-    const hash = createHash("sha256");
-    let byteCount = 0;
-    for await (const chunk of file.createReadStream({ autoClose: false })) {
-      hash.update(chunk);
-      byteCount += chunk.length;
+    if (!opened.isFile()) {
+      result = { status: "directory" };
+    } else if (opened.size !== expectedBytes) {
+      result = { status: "mismatch" };
+    } else {
+      const hash = createHash("sha256");
+      let byteCount = 0;
+      for await (const chunk of file.createReadStream({ autoClose: false })) {
+        hash.update(chunk);
+        byteCount += chunk.length;
+      }
+      result =
+        byteCount === expectedBytes && hash.digest("hex") === expectedSha256
+          ? { status: "ok" }
+          : { status: "mismatch" };
     }
-    return byteCount === expectedBytes && hash.digest("hex") === expectedSha256
-      ? { status: "ok" }
-      : { status: "mismatch" };
   } catch {
-    return { status: "failed", reason: "读取归档文件失败。" };
-  } finally {
-    await file.close().catch(() => undefined);
+    result = { status: "failed", reason: "读取归档文件失败。" };
   }
+  try {
+    await closeFile(file);
+  } catch {
+    return result.status === "failed"
+      ? { status: "failed", reason: `${result.reason} 文件关闭失败。` }
+      : { status: "failed", reason: "文件关闭失败。" };
+  }
+  return result;
 }
 
 function errorCode(error: unknown): string | undefined {

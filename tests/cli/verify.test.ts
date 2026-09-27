@@ -14,6 +14,7 @@ import {
   verifySavedPost,
 } from "../../src/application-runtime";
 import { readDatabaseConfig, readVerifyConfig } from "../../src/config";
+import { checkArchiveFile } from "../../src/files/verify";
 import { databaseEnv, testSql } from "../helpers/postgres";
 
 const postId = "123e4567-e89b-42d3-a456-426614174000";
@@ -89,9 +90,14 @@ test("verify reports current-directory file anomalies without changing facts", a
       ["changed bytes", validPath, "大小或 SHA-256"],
       ["directory", `${postId}/directory`, "路径是目录"],
       ["symlink", `${postId}/symlink`, "符号链接"],
+      ["dangling symlink", `${postId}/dangling-symlink`, "符号链接"],
     ];
     await mkdir(join(archiveRoot, postId, "directory"));
     await symlink(validFile, join(archiveRoot, postId, "symlink"));
+    await symlink(
+      "missing-target.bin",
+      join(archiveRoot, postId, "dangling-symlink"),
+    );
     await writeFile(validFile, "different bytes");
 
     for (const [name, relativePath, expectedText] of cases) {
@@ -130,6 +136,50 @@ test("verify reports current-directory file anomalies without changing facts", a
   } finally {
     await rm(archiveRoot, { recursive: true, force: true });
     await rm(otherRoot, { recursive: true, force: true });
+  }
+});
+
+test("verify retains its primary failure when database close also fails", async () => {
+  const archiveRoot = await mkdtemp(join(tmpdir(), "gms-verify-close-db-"));
+  await seedVersion(`${postId}/missing.bin`);
+  try {
+    const result = await verifySavedPost(
+      readVerifyConfig({ ...databaseEnv, GROK_ARCHIVE_DIR: archiveRoot }),
+      postId,
+      async (sql) => {
+        await sql.close({ timeout: 5 });
+        throw new Error("simulated close failure");
+      },
+    );
+    expect(result.status).toBe("failed");
+    expect(result.message).toContain("保存文件缺失");
+    expect(result.message).not.toContain("数据库连接关闭失败");
+    expect(result.cleanupErrors).toHaveLength(1);
+    expect(result.cleanupErrors[0]).toContain("数据库关闭失败");
+  } finally {
+    await rm(archiveRoot, { recursive: true, force: true });
+  }
+});
+
+test("verify reports an archive file close failure", async () => {
+  const archiveRoot = await mkdtemp(join(tmpdir(), "gms-verify-close-file-"));
+  const relativePath = `${postId}/valid.bin`;
+  await mkdir(join(archiveRoot, postId));
+  await writeFile(join(archiveRoot, relativePath), contents);
+  try {
+    const result = await checkArchiveFile(
+      archiveRoot,
+      relativePath,
+      contents.length,
+      digest,
+      async (file) => {
+        await file.close();
+        throw new Error("simulated file close failure");
+      },
+    );
+    expect(result).toEqual({ status: "failed", reason: "文件关闭失败。" });
+  } finally {
+    await rm(archiveRoot, { recursive: true, force: true });
   }
 });
 
