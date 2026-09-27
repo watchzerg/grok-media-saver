@@ -170,7 +170,53 @@ export async function markNeedsDownload(
     UPDATE post_work SET status = 'pending', last_run_id = ${runId}::uuid,
       selected_key = ${selection.key ?? null},
       quality = ${selection.quality}, mime_type = ${selection.mimeType},
+      expected_bytes = ${"expectedBytes" in selection ? (selection.expectedBytes ?? null) : null},
       last_error = '需要下载当前来源'
     WHERE post_id = ${postId}
+  `;
+}
+
+export async function recordPublishIntent(
+  session: ReservedSQL,
+  postId: string,
+  runId: string,
+  selection: {
+    key?: string;
+    quality: string;
+    mimeType: string;
+    expectedBytes?: number;
+  },
+  intent: {
+    tempName: string;
+    relativePath: string;
+    publishBytes: string;
+    sha256: string;
+  },
+): Promise<void> {
+  const updated = await session<{ post_id: string }[]>`
+    UPDATE post_work SET status = 'finalizing', last_run_id = ${runId}::uuid,
+      selected_key = ${selection.key ?? null}, quality = ${selection.quality},
+      mime_type = ${selection.mimeType}, expected_bytes = ${selection.expectedBytes ?? null},
+      publish_temp_name = ${intent.tempName}, publish_relative_path = ${intent.relativePath},
+      publish_expected_bytes = ${intent.publishBytes}::bigint, publish_sha256 = ${intent.sha256},
+      last_error = NULL
+    WHERE post_id = ${postId} AND status IN ('pending', 'failed')
+      AND publish_sha256 IS NULL
+    RETURNING post_id
+  `;
+  if (updated.length !== 1)
+    throw new KnownSaveFailure("Post 工作在发布意图前发生变化。");
+}
+
+export async function failDownload(
+  session: ReservedSQL,
+  postId: string,
+  runId: string,
+  reason: string,
+): Promise<void> {
+  await session`
+    UPDATE post_work SET status = 'failed', last_run_id = ${runId}::uuid,
+      last_error = ${reason}
+    WHERE post_id = ${postId} AND status = 'pending' AND publish_sha256 IS NULL
   `;
 }

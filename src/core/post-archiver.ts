@@ -1,8 +1,16 @@
+import {
+  BlockedMediaError,
+  discardDownloadedTemp,
+  downloadToTemp,
+  MediaCapabilityUnavailableError,
+  type MediaSource,
+  RetryableMediaError,
+} from "../files/download";
 import { cleanupPublishedTemp, publishIntent } from "../files/publish-intent";
 import { checkArchiveFile } from "../files/verify";
 import type { PostMediaSelection, PostResponse } from "../grok/adapter";
 import { RetryableRequestError } from "../grok/adapter";
-import type { Work } from "../store/save-work";
+import { KnownSaveFailure, type Work } from "../store/save-work";
 
 type Store = {
   readWork(postId: string): Promise<Work | undefined>;
@@ -22,6 +30,18 @@ type Store = {
     runId: string,
     selection: PostMediaSelection,
   ): Promise<void>;
+  recordPublishIntent(
+    postId: string,
+    runId: string,
+    selection: PostMediaSelection,
+    intent: {
+      tempName: string;
+      relativePath: string;
+      publishBytes: string;
+      sha256: string;
+    },
+  ): Promise<void>;
+  failDownload(postId: string, runId: string, reason: string): Promise<void>;
   assertLock(): Promise<void>;
 };
 
@@ -33,6 +53,9 @@ export async function archivePost({
   store,
   getDetail,
   waitBeforeRetry,
+  downloadMedia,
+  hasMediaCapability,
+  mediaTimeouts,
   runId,
 }: {
   postId: string;
@@ -42,6 +65,9 @@ export async function archivePost({
   store: Store;
   getDetail(signal: AbortSignal): Promise<PostResponse>;
   waitBeforeRetry: (signal: AbortSignal) => Promise<void>;
+  downloadMedia?: MediaSource;
+  hasMediaCapability?: () => boolean;
+  mediaTimeouts?: { firstByte: number; noProgress: number; total: number };
   runId: string;
 }) {
   let saved = false;
@@ -161,13 +187,115 @@ export async function archivePost({
       } else {
         await store.markFileNotReusable(postId, runId);
         result.message = "当前保存文件无法复用，需要重新下载；本次保存未完成。";
+        await saveDownloaded(detail.selection);
       }
     } else {
       if (work?.status !== "finalizing") {
         await store.markNeedsDownload(postId, runId, detail.selection);
       }
       result.message = "当前来源或元数据变化，需要下载；本次保存未完成。";
+      await saveDownloaded(detail.selection);
     }
   }
   return result;
+
+  async function saveDownloaded(initial: PostMediaSelection): Promise<void> {
+    if (!downloadMedia || (hasMediaCapability && !hasMediaCapability())) {
+      return;
+    }
+    let selection = initial;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      if (signal.aborted) throw new Error("保存已停止。");
+      await store.assertLock();
+      await waitBeforeRetry(signal);
+      if (signal.aborted) throw new Error("保存已停止。");
+      onStage?.("下载当前媒体");
+      let intent: Awaited<ReturnType<typeof downloadToTemp>>;
+      try {
+        intent = await downloadToTemp(
+          archiveRoot,
+          postId,
+          selection,
+          downloadMedia,
+          signal,
+          onStage,
+          mediaTimeouts,
+        );
+      } catch (error) {
+        if (signal.aborted) throw error;
+        if (error instanceof MediaCapabilityUnavailableError) {
+          return;
+        }
+        if (error instanceof BlockedMediaError) {
+          result.status = "blocked";
+          result.message = error.message;
+          return;
+        }
+        if (error instanceof RetryableMediaError && attempt < 2) {
+          await waitBeforeRetry(signal);
+          await store.assertLock();
+          const next = await getDetail(signal);
+          if (next.kind === "blocked") {
+            result.status = "blocked";
+            result.message = "Post 详情重读被阻挡。";
+            return;
+          }
+          if (next.kind !== "post") {
+            await store.failDownload(postId, runId, "媒体重试前的详情不可读取");
+            result.message = "媒体重试前的详情不可读取。";
+            return;
+          }
+          selection = next.selection;
+          await store.markNeedsDownload(postId, runId, selection);
+          continue;
+        }
+        if (
+          error instanceof RetryableMediaError ||
+          (error instanceof Error && /^媒体请求失败/.test(error.message))
+        ) {
+          await store.failDownload(postId, runId, error.message);
+          result.message = error.message;
+          return;
+        }
+        throw error;
+      }
+      try {
+        await store.assertLock();
+        if (signal.aborted) throw new Error("保存已停止。");
+      } catch (error) {
+        await discardDownloadedTemp(archiveRoot, postId, intent);
+        throw error;
+      }
+      onStage?.("提交发布意图");
+      try {
+        await store.recordPublishIntent(postId, runId, selection, intent);
+      } catch (error) {
+        if (error instanceof KnownSaveFailure)
+          await discardDownloadedTemp(archiveRoot, postId, intent);
+        throw error;
+      }
+      const work = await store.readWork(postId);
+      if (work?.status !== "finalizing")
+        throw new Error("发布意图提交后无法确认工作状态。");
+      const publication = await publishIntent(
+        archiveRoot,
+        postId,
+        work,
+        signal,
+        onStage,
+      );
+      if (publication !== "published")
+        throw new Error("新发布意图的临时文件缺失。");
+      await store.assertLock();
+      onStage?.("提交保存结果");
+      await store.settleIntent(postId, work, runId);
+      saved = true;
+      onStage?.("保存结果已提交");
+      const cleanup = await cleanupPublishedTemp(archiveRoot, postId, work);
+      if (cleanup) result.cleanupErrors.push(cleanup);
+      result.status = "ok";
+      result.message = "Post 保存完成。";
+      return;
+    }
+  }
 }

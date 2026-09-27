@@ -110,7 +110,13 @@ test("inspect post resolves relative media keys against the approved media origi
       mimeType: "image/jpeg",
       key: "image/2026/09/example.jpg",
     }),
-  ).toMatchObject({ status: "ok", selection: { quality: "image" } });
+  ).toMatchObject({
+    status: "ok",
+    selection: {
+      quality: "image",
+      key: "https://assets.grok.com/image/2026/09/example.jpg",
+    },
+  });
   expect(
     await inspectBody({
       assetId: postId,
@@ -118,7 +124,13 @@ test("inspect post resolves relative media keys against the approved media origi
       key: "video/base.mp4",
       hdKey: "video/720.mp4",
     }),
-  ).toMatchObject({ status: "ok", selection: { quality: "720p" } });
+  ).toMatchObject({
+    status: "ok",
+    selection: {
+      quality: "720p",
+      key: "https://assets.grok.com/video/720.mp4",
+    },
+  });
 });
 
 test("inspect post rejects relative media keys that resolve outside supported HTTPS hosts", async () => {

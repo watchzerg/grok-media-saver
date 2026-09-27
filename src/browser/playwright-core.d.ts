@@ -38,6 +38,14 @@ type PageLike = {
   ): Promise<PageResponseLike>;
   close(options?: { runBeforeUnload?: boolean }): Promise<void>;
   isClosed(): boolean;
+  exposeBinding(
+    name: string,
+    callback: (_source: unknown, payload: unknown) => Promise<void>,
+  ): Promise<void>;
+  evaluate<T>(
+    callback: (argument: { url: string; binding: string }) => Promise<T>,
+    argument: { url: string; binding: string },
+  ): Promise<T>;
 };
 
 type PageRouteLike = {

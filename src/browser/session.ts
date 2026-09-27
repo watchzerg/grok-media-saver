@@ -1,4 +1,6 @@
 import bundle from "playwright-core/lib/coreBundle";
+import type { MediaSource } from "../files/download";
+import { RetryableMediaError } from "../files/download";
 import type {
   PageResponse,
   PostResponse,
@@ -19,6 +21,7 @@ const LIST_REQUEST_PATTERN = "**/rest/assets?*";
 export type BrowserSession = {
   getFirstPage(signal: AbortSignal): Promise<PageResponse>;
   getPostDetail(assetId: string, signal: AbortSignal): Promise<PostResponse>;
+  downloadMedia: MediaSource;
   close(): Promise<void>;
   cleanupNotices: string[];
 };
@@ -106,6 +109,127 @@ export async function connectBrowserSession(
 
   return {
     cleanupNotices,
+    async downloadMedia(selection, onResponse, onChunk, signal) {
+      if (closed || disconnected)
+        throw new UnconfirmedStopError("Chrome Extension 连接已断开。");
+      if (!page || page.isClosed())
+        throw new Error("媒体请求需要已确认的 Post 页面。");
+      if (!selection.key) throw new Error("所选媒体缺少地址。");
+      const mediaPage = page;
+      const binding = `gmsMedia${crypto.randomUUID().replaceAll("-", "")}`;
+      let sinkError: unknown;
+      await mediaPage.exposeBinding(binding, async (_source, payload) => {
+        try {
+          if (!payload || typeof payload !== "object")
+            throw new Error("媒体流消息无效。");
+          const message = payload as {
+            kind: string;
+            status?: number;
+            contentType?: string;
+            contentLength?: string | null;
+            contentEncoding?: string | null;
+            retryAfter?: string | null;
+            finalUrl?: string;
+            bytes?: number[];
+          };
+          if (message.kind === "response") {
+            await onResponse({
+              status: message.status ?? 0,
+              contentType: message.contentType ?? "",
+              contentLength: message.contentLength ?? null,
+              contentEncoding: message.contentEncoding ?? null,
+              retryAfter: message.retryAfter,
+              finalUrl: message.finalUrl,
+            });
+          } else if (message.kind === "chunk" && Array.isArray(message.bytes)) {
+            await onChunk(Uint8Array.from(message.bytes));
+          } else throw new Error("媒体流消息无效。");
+        } catch (error) {
+          sinkError = error;
+          throw error;
+        }
+      });
+      let rejectStopped!: (error: Error) => void;
+      const stopped = new Promise<never>((_, reject) => {
+        rejectStopped = reject;
+      });
+      void stopped.catch(() => {});
+      const onAbort = () => {
+        void closeOwnedPage().then(
+          () => rejectStopped(new Error("媒体请求已停止。")),
+          (error) =>
+            rejectStopped(
+              new UnconfirmedStopError("媒体请求停止无法确认。", {
+                cause: error,
+              }),
+            ),
+        );
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      if (signal.aborted) onAbort();
+      try {
+        onRequestStart();
+        await Promise.race([
+          mediaPage.evaluate(
+            async ({ url, binding }) => {
+              const send = (globalThis as Record<string, unknown>)[binding] as (
+                value: unknown,
+              ) => Promise<void>;
+              const response = await fetch(url, {
+                credentials: "include",
+                redirect: "follow",
+              });
+              await send({
+                kind: "response",
+                status: response.status,
+                contentType: response.headers.get("content-type") ?? "",
+                contentLength: response.headers.get("content-length"),
+                contentEncoding: response.headers.get("content-encoding"),
+                retryAfter: response.headers.get("retry-after"),
+                finalUrl: response.url,
+              });
+              if (!response.body) throw new Error("媒体响应没有可读正文。");
+              const reader = response.body.getReader();
+              try {
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  await send({ kind: "chunk", bytes: Array.from(value) });
+                }
+              } finally {
+                reader.releaseLock();
+              }
+            },
+            { url: selection.key, binding },
+          ),
+          stopped,
+        ]);
+        if (signal.aborted) {
+          await closeOwnedPage();
+          throw new Error("媒体请求已停止。");
+        }
+        if (disconnected)
+          throw new UnconfirmedStopError(
+            "Chrome Extension 连接中断，无法确认媒体请求已停止。",
+          );
+      } catch (error) {
+        if (error instanceof UnconfirmedStopError) throw error;
+        try {
+          await closeOwnedPage();
+        } catch (closeError) {
+          throw new UnconfirmedStopError("媒体请求停止无法确认。", {
+            cause: closeError,
+          });
+        }
+        if (sinkError) throw sinkError;
+        if (signal.aborted) throw error;
+        throw new RetryableMediaError("媒体请求中断或响应流失败。", {
+          cause: error,
+        });
+      } finally {
+        signal.removeEventListener("abort", onAbort);
+      }
+    },
     async getFirstPage(signal) {
       if (closed || disconnected)
         throw new Error("Chrome Extension 连接已断开。");

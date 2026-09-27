@@ -32,6 +32,31 @@ mock.module("../../src/browser/session.ts", () => ({
           },
         });
       },
+      ...(process.env.GMS_TEST_MEDIA === "1"
+        ? {
+            downloadMedia: async (
+              _selection: unknown,
+              onResponse: (headers: unknown) => Promise<void>,
+              onChunk: (chunk: Uint8Array) => Promise<void>,
+            ) => {
+              const image = Buffer.from(
+                "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489",
+                "hex",
+              );
+              await onResponse({
+                status: 200,
+                contentType: "image/png",
+                contentLength: String(image.length),
+                contentEncoding: null,
+              });
+              if (process.env.GMS_TEST_ABORT_MEDIA === "1") {
+                process.kill(process.pid, "SIGINT");
+                await Bun.sleep(20);
+              }
+              await onChunk(image);
+            },
+          }
+        : {}),
       close: async () => {},
       cleanupNotices: [],
     };

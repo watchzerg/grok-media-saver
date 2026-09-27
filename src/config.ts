@@ -17,12 +17,47 @@ export type VerifyConfig = DatabaseConfig & {
   archiveRoot: string;
 };
 
-export type SaveConfig = VerifyConfig & InspectConfig;
+export type SaveConfig = VerifyConfig &
+  InspectConfig & {
+    mediaFirstByteTimeoutSeconds: number;
+    mediaNoProgressTimeoutSeconds: number;
+    mediaTotalTimeoutSeconds: number;
+  };
 
 export function readSaveConfig(
   env: Record<string, string | undefined>,
 ): SaveConfig {
-  return { ...readVerifyConfig(env), ...readInspectConfig(env) };
+  return {
+    ...readVerifyConfig(env),
+    ...readInspectConfig(env),
+    mediaFirstByteTimeoutSeconds: readPositiveSeconds(
+      env.GROK_MEDIA_FIRST_BYTE_TIMEOUT_SECONDS,
+      30,
+      "GROK_MEDIA_FIRST_BYTE_TIMEOUT_SECONDS",
+    ),
+    mediaNoProgressTimeoutSeconds: readPositiveSeconds(
+      env.GROK_MEDIA_NO_PROGRESS_TIMEOUT_SECONDS,
+      30,
+      "GROK_MEDIA_NO_PROGRESS_TIMEOUT_SECONDS",
+    ),
+    mediaTotalTimeoutSeconds: readPositiveSeconds(
+      env.GROK_MEDIA_TOTAL_TIMEOUT_SECONDS,
+      900,
+      "GROK_MEDIA_TOTAL_TIMEOUT_SECONDS",
+    ),
+  };
+}
+
+function readPositiveSeconds(
+  raw: string | undefined,
+  fallback: number,
+  key: string,
+): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0)
+    throw new Error(`${key} 必须是正的有限秒数。`);
+  return value;
 }
 
 export function readDatabaseConfig(

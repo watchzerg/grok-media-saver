@@ -1,6 +1,10 @@
 import type { ReservedSQL } from "bun";
 import type { SaveConfig } from "./config";
 import { archivePost } from "./core/post-archiver";
+import {
+  MediaCapabilityUnavailableError,
+  type MediaSource,
+} from "./files/download";
 import type { PostResponse } from "./grok/adapter";
 import { connectDatabase, safeDatabaseError } from "./store/database";
 import {
@@ -16,12 +20,14 @@ import {
 } from "./store/save-run";
 import {
   clearMissingIntent,
+  failDownload,
   failUnreadableDetail,
   KnownSaveFailure,
   markFileNotReusable,
   markNeedsDownload,
   readSavedVersion,
   readWork,
+  recordPublishIntent,
   settleIntent,
   startWork,
 } from "./store/save-work";
@@ -29,6 +35,7 @@ import { verifySchema } from "./store/schema";
 
 export type SavePostSession = {
   getPostDetail(postId: string, signal: AbortSignal): Promise<PostResponse>;
+  downloadMedia?: MediaSource;
   close(): Promise<void>;
   cleanupNotices?: string[];
 };
@@ -139,6 +146,12 @@ export async function savePost(
           write(() => markFileNotReusable(activeSession, id, run)),
         markNeedsDownload: (id, run, selection) =>
           write(() => markNeedsDownload(activeSession, id, run, selection)),
+        recordPublishIntent: (id, run, selection, intent) =>
+          write(() =>
+            recordPublishIntent(activeSession, id, run, selection, intent),
+          ),
+        failDownload: (id, run, reason) =>
+          write(() => failDownload(activeSession, id, run, reason)),
         assertLock: () => assertExecutorLock(activeSession),
       },
       getDetail: async (detailSignal) => {
@@ -146,6 +159,24 @@ export async function savePost(
         return browser.getPostDetail(postId, detailSignal);
       },
       waitBeforeRetry: options.waitBeforeRetry,
+      downloadMedia: async (selection, onResponse, onChunk, transferSignal) => {
+        if (!browser?.downloadMedia)
+          throw new MediaCapabilityUnavailableError(
+            "浏览器会话不支持媒体流传输。",
+          );
+        await browser.downloadMedia(
+          selection,
+          onResponse,
+          onChunk,
+          transferSignal,
+        );
+      },
+      hasMediaCapability: () => Boolean(browser?.downloadMedia),
+      mediaTimeouts: {
+        firstByte: config.mediaFirstByteTimeoutSeconds * 1000,
+        noProgress: config.mediaNoProgressTimeoutSeconds * 1000,
+        total: config.mediaTotalTimeoutSeconds * 1000,
+      },
       runId,
     });
     Object.assign(result, postResult);
@@ -187,7 +218,7 @@ export async function savePost(
         );
       }
       if (browser.cleanupNotices?.length)
-        result.cleanupErrors.push(...browser.cleanupNotices);
+        result.message = `${result.message} ${browser.cleanupNotices.join(" ")}`;
     }
     if (session) {
       if (lockAcquired) {

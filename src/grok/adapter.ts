@@ -161,8 +161,8 @@ export function parsePostDetailResponse(
     return { kind: "unknown" };
   }
 
-  if (typeof key !== "string" || !isSupportedMediaUrl(key))
-    return { kind: "unknown" };
+  const mediaUrl = typeof key === "string" ? normalizeMediaUrl(key) : undefined;
+  if (!mediaUrl) return { kind: "unknown" };
   let expectedBytes: number | undefined;
   if (quality === "image" || quality === "original") {
     const rawBytes = body.sizeBytes;
@@ -179,7 +179,7 @@ export function parsePostDetailResponse(
       assetId: requestedId,
       mimeType: body.mimeType,
       quality,
-      key,
+      key: mediaUrl,
       ...(expectedBytes === undefined ? {} : { expectedBytes }),
     },
   };
@@ -190,19 +190,19 @@ export function normalizePostId(value: string): string | undefined {
   return uuid.test(normalized) ? normalized : undefined;
 }
 
-function isSupportedMediaUrl(value: string): boolean {
-  if (!value.trim()) return false;
+function normalizeMediaUrl(value: string): string | undefined {
+  if (!value.trim()) return undefined;
   try {
     const url = new URL(value, "https://assets.grok.com/");
-    return (
-      url.protocol === "https:" &&
+    return url.protocol === "https:" &&
       !url.username &&
       !url.password &&
       !url.port &&
       ["assets.grok.com", "videos.grok.com"].includes(url.hostname)
-    );
+      ? url.href
+      : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
