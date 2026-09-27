@@ -169,6 +169,89 @@ test("S1 stop after settling an old publication counts its saved fact", async ()
   }
 });
 
+test("S1 stop before rereading an already saved Post leaves this page member unprocessed", async () => {
+  await reset();
+  const root = await mkdtemp(join(tmpdir(), "gms-page-saved-stop-"));
+  const first = ids[0] as string;
+  const second = ids[1] as string;
+  const controller = new AbortController();
+  try {
+    await testSql`INSERT INTO post_work (post_id,status) VALUES (${first},'saved')`;
+    const env = {
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture",
+      GROK_API_INTERVAL_MIN_SECONDS: "0",
+      GROK_API_INTERVAL_MAX_SECONDS: "0",
+    };
+    const result = await saveFirstPage(
+      readDatabaseConfig(env),
+      undefined,
+      controller.signal,
+      () => readSaveConfig(env),
+      async () => {
+        throw new Error("stopped before detail connection");
+      },
+      (stage) => {
+        if (stage === "读取当前详情") controller.abort();
+      },
+      async () => ({
+        getFirstPage: async () => ({
+          kind: "page",
+          assets: [first, second].map((assetId) => ({
+            assetId,
+            mimeType: "image/png",
+          })),
+          hasNextPage: false,
+        }),
+        close: async () => {},
+      }),
+    );
+    expect(result.status).toBe("cancelled");
+    expect(result.message).toContain("已保存 0，失败 0，未处理 2");
+    const [savedRun] = await testSql<{ outcome: string; summary: unknown }[]>`
+      SELECT outcome, summary FROM runs WHERE command='save-first-page'`;
+    expect(savedRun).toEqual({
+      outcome: "stopped",
+      summary: { saved: 0, failed: 0, unprocessed: 2 },
+    });
+    const works = await testSql<{ post_id: string; status: string }[]>`
+      SELECT post_id, status FROM post_work ORDER BY post_id`;
+    expect(works).toEqual([{ post_id: first, status: "saved" }]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("S2 stop before rereading an already saved Post reports no new save", async () => {
+  await reset();
+  const root = await mkdtemp(join(tmpdir(), "gms-page-saved-cli-stop-"));
+  const first = ids[0] as string;
+  const second = ids[1] as string;
+  try {
+    await testSql`INSERT INTO post_work (post_id,status) VALUES (${first},'saved')`;
+    const result = await run({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture",
+      GROK_API_INTERVAL_MIN_SECONDS: "0",
+      GROK_API_INTERVAL_MAX_SECONDS: "0",
+      GMS_TEST_PAGE_IDS: [first, second].join(","),
+      GMS_TEST_ABORT_DETAIL_ID: first,
+    });
+    expect(result.exitCode).toBe(130);
+    expect(result.stderr).toContain("已保存 0，失败 0，未处理 2");
+    const [savedRun] = await testSql<{ outcome: string; summary: unknown }[]>`
+      SELECT outcome, summary FROM runs WHERE command='save-first-page'`;
+    expect(savedRun).toEqual({
+      outcome: "stopped",
+      summary: { saved: 0, failed: 0, unprocessed: 2 },
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("S1 Application schedules one page in order and persists only started Posts", async () => {
   await reset();
   const root = await mkdtemp(join(tmpdir(), "gms-page-app-"));

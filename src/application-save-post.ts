@@ -56,6 +56,8 @@ export type SavePostResult = {
   cleanupErrors: string[];
 };
 
+type ArchivePostInRunResult = SavePostResult & { settledIntent: boolean };
+
 export function safeSaveError(error: unknown, config: SaveConfig): string {
   let message = safeDatabaseError(error, config);
   for (const secret of [
@@ -76,11 +78,12 @@ export async function archivePostInRun(
   write: <T>(operation: () => Promise<T>) => Promise<T>,
   onSaved: () => void,
   onCleanupError: (message: string) => void,
-): Promise<SavePostResult> {
+): Promise<ArchivePostInRunResult> {
   const signal = options.signal ?? new AbortController().signal;
   let browser: SavePostSession | undefined;
-  let postResult: SavePostResult | undefined;
+  let postResult: ArchivePostInRunResult | undefined;
   let saved = false;
+  let settledIntent = false;
   const recordSaved = () => {
     saved = true;
     onSaved();
@@ -102,6 +105,7 @@ export async function archivePostInRun(
           write(() => clearMissingIntent(session, id, work, run)),
         settleIntent: async (id, work, run) => {
           await write(() => settleIntent(session, id, work, run));
+          settledIntent = true;
           recordSaved();
         },
         failUnreadableDetail: (id, run) =>
@@ -145,7 +149,7 @@ export async function archivePostInRun(
       },
       runId,
     });
-    postResult = { ...archived, saveRecorded: saved };
+    postResult = { ...archived, saveRecorded: saved, settledIntent };
     return postResult;
   } finally {
     if (browser) {

@@ -427,7 +427,7 @@ async function runBatch(
                   if (
                     browserResult.status === "ok" ||
                     (browserResult.status === "cancelled" &&
-                      browserResult.saveRecorded === true)
+                      browserResult.settledIntent)
                   )
                     counts.saved += 1;
                   else {
