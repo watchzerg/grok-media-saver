@@ -196,6 +196,177 @@ test("S1 explicit save rereads a saved Post and reuses a verified version", asyn
   expect(preserved?.saved_version).toBeTruthy();
 });
 
+test("S1 changed source reuses equal content and keeps a distinct older version", async () => {
+  const config = await setup();
+  const changed = Buffer.concat([png, Buffer.from([1])]);
+  let key = "https://assets.grok.com/first.png";
+  let bytes = png;
+  let downloads = 0;
+  let failDownload = false;
+  const connect = async () => ({
+    getPostDetail: async () => ({
+      kind: "post" as const,
+      selection: {
+        assetId: postId,
+        key,
+        mimeType: "image/png",
+        quality: "image" as const,
+        expectedBytes: bytes.length,
+      },
+    }),
+    downloadMedia: async (
+      _selection: unknown,
+      onResponse: (response: {
+        status: number;
+        contentType: string;
+        contentLength: string;
+        contentEncoding: string;
+      }) => Promise<void>,
+      onChunk: (chunk: Uint8Array) => Promise<void>,
+    ) => {
+      downloads += 1;
+      await onResponse({
+        status: failDownload ? 404 : 200,
+        contentType: "image/png",
+        contentLength: String(bytes.length),
+        contentEncoding: "identity",
+      });
+      await onChunk(bytes);
+    },
+    close: async () => {},
+  });
+  const save = () =>
+    saveSelectedPost(
+      config,
+      postId,
+      new AbortController().signal,
+      undefined,
+      connect,
+    );
+  expect((await save()).status).toBe("ok");
+  const [first] = await testSql<
+    { id: string; relative_path: string }[]
+  >`SELECT id::text, relative_path FROM media_versions WHERE post_id = ${postId}`;
+  if (!first) throw new Error("初次版本缺失");
+
+  key = "https://assets.grok.com/same-content.png";
+  expect((await save()).status).toBe("ok");
+  const [same] = await testSql<
+    { selected_key: string; saved_media_version_id: string; versions: number }[]
+  >`SELECT selected_key, saved_media_version_id::text,
+    (SELECT count(*)::integer FROM media_versions WHERE post_id = ${postId}) AS versions
+    FROM post_work WHERE post_id = ${postId}`;
+  expect(same).toEqual({
+    selected_key: key,
+    saved_media_version_id: first.id,
+    versions: 1,
+  });
+  expect(downloads).toBe(2);
+
+  key = "https://assets.grok.com/new-content.png";
+  bytes = changed;
+  expect((await save()).status).toBe("ok");
+  const [current] = await testSql<
+    { selected_key: string; saved_media_version_id: string; versions: number }[]
+  >`SELECT selected_key, saved_media_version_id::text,
+    (SELECT count(*)::integer FROM media_versions WHERE post_id = ${postId}) AS versions
+    FROM post_work WHERE post_id = ${postId}`;
+  expect(current?.selected_key).toBe(key);
+  expect(current?.saved_media_version_id).not.toBe(first.id);
+  expect(current?.versions).toBe(2);
+  expect(downloads).toBe(3);
+  expect(await readFile(join(config.archiveRoot, first.relative_path))).toEqual(
+    png,
+  );
+  expect(
+    (
+      await verifySavedPost(
+        readVerifyConfig({
+          ...databaseEnv,
+          GROK_ARCHIVE_DIR: config.archiveRoot,
+        }),
+        postId,
+      )
+    ).status,
+  ).toBe("ok");
+
+  key = "https://assets.grok.com/unavailable.png";
+  failDownload = true;
+  expect((await save()).status).toBe("failed");
+  const [failed] = await testSql<
+    { status: string; saved_media_version_id: string; versions: number }[]
+  >`SELECT status, saved_media_version_id::text,
+    (SELECT count(*)::integer FROM media_versions WHERE post_id = ${postId}) AS versions
+    FROM post_work WHERE post_id = ${postId}`;
+  expect(failed).toEqual({
+    status: "failed",
+    saved_media_version_id: current?.saved_media_version_id,
+    versions: 2,
+  });
+  expect(await readFile(join(config.archiveRoot, first.relative_path))).toEqual(
+    png,
+  );
+});
+
+test("S1 higher quality rereads and redownloads even when bytes match", async () => {
+  const config = await setup();
+  let quality: "original" | "720p" = "original";
+  let downloads = 0;
+  const connect = async () => ({
+    getPostDetail: async () => ({
+      kind: "post" as const,
+      selection: {
+        assetId: postId,
+        key:
+          quality === "original"
+            ? "https://videos.grok.com/original.mp4"
+            : "https://videos.grok.com/hd.mp4",
+        mimeType: "video/mp4",
+        quality,
+        expectedBytes: mp4.length,
+      },
+    }),
+    downloadMedia: async (
+      _selection: unknown,
+      onResponse: (response: {
+        status: number;
+        contentType: string;
+        contentLength: string;
+        contentEncoding: string;
+      }) => Promise<void>,
+      onChunk: (chunk: Uint8Array) => Promise<void>,
+    ) => {
+      downloads += 1;
+      await onResponse({
+        status: 200,
+        contentType: "video/mp4",
+        contentLength: String(mp4.length),
+        contentEncoding: "identity",
+      });
+      await onChunk(mp4);
+    },
+    close: async () => {},
+  });
+  const save = () =>
+    saveSelectedPost(
+      config,
+      postId,
+      new AbortController().signal,
+      undefined,
+      connect,
+    );
+  expect((await save()).status).toBe("ok");
+  quality = "720p";
+  expect((await save()).status).toBe("ok");
+  const [work] = await testSql<
+    { quality: string; versions: number }[]
+  >`SELECT quality,
+    (SELECT count(*)::integer FROM media_versions WHERE post_id = ${postId}) AS versions
+    FROM post_work WHERE post_id = ${postId}`;
+  expect(work).toEqual({ quality: "720p", versions: 1 });
+  expect(downloads).toBe(2);
+});
+
 test.each(["missing", "corrupt"] as const)(
   "S1 saved file %s follows download and preserves the existing version",
   async (condition) => {
