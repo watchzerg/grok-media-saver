@@ -1,9 +1,15 @@
 import type { SQL } from "bun";
 import { inspectFirstPage, inspectPost } from "./application";
 import { connectBrowserSession } from "./browser/session";
-import type { DatabaseConfig, InspectConfig, VerifyConfig } from "./config";
+import type {
+  DatabaseConfig,
+  InspectConfig,
+  SaveConfig,
+  VerifyConfig,
+} from "./config";
 import { checkArchiveFile } from "./files/verify";
 import { createRequestScheduler } from "./grok/request-scheduler";
+import { savePost } from "./save-post";
 import { connectDatabase, safeDatabaseError } from "./store/database";
 import {
   assertExecutorLock,
@@ -588,5 +594,27 @@ export async function inspectSavedPost(
         connectSignal,
       ),
     waitBeforeRetry: scheduler.beforeRequest,
+  });
+}
+
+export async function saveSelectedPost(
+  config: SaveConfig,
+  postId: string,
+  signal: AbortSignal,
+  onStage?: (stage: string) => void,
+) {
+  const scheduler = createRequestScheduler({
+    minSeconds: config.requestIntervalMinSeconds,
+    maxSeconds: config.requestIntervalMaxSeconds,
+  });
+  return savePost(config, postId, {
+    signal,
+    onStage,
+    connect: (connectSignal) =>
+      connectBrowserSession(
+        config.savedPageUrl,
+        scheduler.requestStarted,
+        connectSignal,
+      ),
   });
 }

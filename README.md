@@ -1,6 +1,6 @@
 # grok-media-saver
 
-本项目面向个人本地使用，目标是利用现有 Chrome 登录态，将 Grok Saved 列表中的 AI 生成图片和常见小视频可靠归档到本地，并在安全保存后移除对应远端 Post。当前提供只读 Saved 第一页及指定 Post 检查的 Application/CLI 路径。2026-09-27 的正式主机验收中，CLI 两次成功连接并读取 40 条第一页，断开后 Chrome 仍运行且第二次成功重连；现场也核对了 Saved 页自动发出的第一页请求及其过滤条件。Ctrl+C 竞速、连接断开与清理故障尚未在正式浏览器中触发，媒体保存传输也尚未现场验收。归档行为以[一期可靠保存规格](docs/specs/phase1-saving.md)为准。
+本项目面向个人本地使用，目标是利用现有 Chrome 登录态，将 Grok Saved 列表中的 AI 生成图片和常见小视频可靠归档到本地，并在安全保存后移除对应远端 Post。当前提供只读 Saved 第一页及指定 Post 检查，以及指定 Post 的已核验发布意图接续路径。2026-09-27 的正式主机验收中，CLI 两次成功连接并读取 40 条第一页，断开后 Chrome 仍运行且第二次成功重连；现场也核对了 Saved 页自动发出的第一页请求及其过滤条件。Ctrl+C 竞速、连接断开与清理故障尚未在正式浏览器中触发，媒体保存传输也尚未现场验收。归档行为以[一期可靠保存规格](docs/specs/phase1-saving.md)为准。
 
 ## 工具链
 
@@ -48,6 +48,16 @@ mise exec -- bun src/cli.ts status
 ```sh
 mise exec -- bun src/cli.ts retry
 ```
+
+## 接续指定 Post 的发布意图
+
+`save post <Post-ID>` 在项目数据库与 `GROK_ARCHIVE_DIR` 当前目录中核对已有 `finalizing` 意图。正式文件匹配时同步并补记保存；正式缺失而临时文件匹配时无覆盖发布，再提交保存结果。之后读取当前 Post 详情，只有来源和文件仍匹配才把本次命令视为完成。若当前来源变化、文件缺失或尚无可用文件，命令明确报告需要下载并返回 `1`；下载路径仍待后续实现。冲突会保留现场和意图，不覆盖目标文件。
+
+```sh
+mise exec -- bun src/cli.ts save post <Post-ID>
+```
+
+此命令需要数据库、归档目录和 Playwright Extension 配置；只作用于当前 schema 与新启动的 Run。首次 Ctrl+C 停止新请求，已开始的文件发布及短事务先完成必要收尾；再次运行同一命令会重新核对数据库与文件事实。
 
 ## 核验指定 Post 的本地文件
 

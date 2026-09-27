@@ -5,7 +5,9 @@ import {
   readProjectStatus,
 } from "../../src/application-runtime";
 import { readDatabaseConfig } from "../../src/config";
-import { databaseEnv, testSql } from "../helpers/postgres";
+import { databaseEnv, testSql, useIsolatedPostgres } from "../helpers/postgres";
+
+useIsolatedPostgres();
 
 test("db init creates the current schema once and succeeds on an exact repeat", async () => {
   const first = await runCli(databaseEnv, ["db", "init"]);

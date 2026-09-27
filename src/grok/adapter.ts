@@ -16,6 +16,8 @@ export type PostMediaSelection = {
   assetId: string;
   mimeType: string;
   quality: "image" | "1080p" | "720p" | "original";
+  key?: string;
+  expectedBytes?: number;
 };
 
 export type PostResponse =
@@ -161,9 +163,25 @@ export function parsePostDetailResponse(
 
   if (typeof key !== "string" || !isSupportedMediaUrl(key))
     return { kind: "unknown" };
+  let expectedBytes: number | undefined;
+  if (quality === "image" || quality === "original") {
+    const rawBytes = body.sizeBytes;
+    if (rawBytes !== undefined && rawBytes !== null) {
+      const parsedBytes = Number(rawBytes);
+      if (!Number.isSafeInteger(parsedBytes) || parsedBytes < 0)
+        return { kind: "unknown" };
+      expectedBytes = parsedBytes;
+    }
+  }
   return {
     kind: "post",
-    selection: { assetId: requestedId, mimeType: body.mimeType, quality },
+    selection: {
+      assetId: requestedId,
+      mimeType: body.mimeType,
+      quality,
+      key,
+      ...(expectedBytes === undefined ? {} : { expectedBytes }),
+    },
   };
 }
 

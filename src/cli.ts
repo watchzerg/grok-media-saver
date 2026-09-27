@@ -4,6 +4,7 @@ import {
   inspectSavedPost,
   readProjectStatus,
   retryUnfinishedPosts,
+  saveSelectedPost,
   verifySavedPost,
 } from "./application-runtime";
 import {
@@ -11,12 +12,13 @@ import {
   type InspectConfig,
   readDatabaseConfig,
   readInspectConfig,
+  readSaveConfig,
   readVerifyConfig,
 } from "./config";
 import { normalizePostId } from "./grok/adapter";
 
 const usage =
-  "用法：grok-media-saver db init | status | retry | verify <Post ID> | inspect first-page | inspect post <Post ID>";
+  "用法：grok-media-saver db init | status | retry | verify <Post ID> | inspect first-page | inspect post <Post ID> | save post <Post ID>";
 
 type CliDependencies = {
   initializeProjectDatabase: typeof initializeProjectDatabase;
@@ -36,6 +38,8 @@ export async function main(
   const isVerify = args.length === 2 && args[0] === "verify";
   const isPost =
     args.length === 3 && args[0] === "inspect" && args[1] === "post";
+  const isSavePost =
+    args.length === 3 && args[0] === "save" && args[1] === "post";
   if (isDatabaseInit) {
     let config: DatabaseConfig;
     try {
@@ -120,17 +124,18 @@ export async function main(
       process.off("SIGINT", stop);
     }
   }
-  if (!isFirstPage && !isPost && !isVerify) {
+  if (!isFirstPage && !isPost && !isVerify && !isSavePost) {
     console.error(usage);
     return 2;
   }
 
-  const assetId = isPost
-    ? normalizePostId(args[2])
-    : isVerify
-      ? normalizePostId(args[1])
-      : undefined;
-  if ((isPost || isVerify) && !assetId) {
+  const assetId =
+    isPost || isSavePost
+      ? normalizePostId(args[2])
+      : isVerify
+        ? normalizePostId(args[1])
+        : undefined;
+  if ((isPost || isSavePost || isVerify) && !assetId) {
     console.error("Post ID 必须是带连字符的 UUID。");
     return 2;
   }
@@ -147,6 +152,45 @@ export async function main(
     console.log(result.message);
     for (const error of result.cleanupErrors) console.error(error);
     return result.status === "ok" ? 0 : 1;
+  }
+
+  if (isSavePost) {
+    let config: ReturnType<typeof readSaveConfig>;
+    try {
+      config = readSaveConfig(env);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "配置无效。");
+      return 2;
+    }
+    const controller = new AbortController();
+    let stopCount = 0;
+    const stop = () => {
+      stopCount += 1;
+      if (stopCount === 1) controller.abort();
+      else {
+        console.error("已强制停止；Run 或发布文件可能仍待核对。");
+        process.exit(130);
+      }
+    };
+    process.on("SIGINT", stop);
+    try {
+      const result = await saveSelectedPost(
+        config,
+        assetId as string,
+        controller.signal,
+        (stage) => console.log(`阶段：${stage}。`),
+      );
+      if (result.status === "ok") console.log(result.message);
+      else console.error(result.message);
+      for (const error of result.cleanupErrors) console.error(error);
+      return result.status === "cancelled"
+        ? 130
+        : result.status === "ok"
+          ? 0
+          : 1;
+    } finally {
+      process.off("SIGINT", stop);
+    }
   }
 
   let config: InspectConfig;

@@ -15,7 +15,9 @@ import {
   verifySavedPost,
 } from "../../src/application-runtime";
 import { readDatabaseConfig, readVerifyConfig } from "../../src/config";
-import { databaseEnv, testSql } from "../helpers/postgres";
+import { databaseEnv, testSql, useIsolatedPostgres } from "../helpers/postgres";
+
+useIsolatedPostgres();
 
 const postId = "123e4567-e89b-42d3-a456-426614174000";
 const contents = Buffer.from("verified archive fixture");

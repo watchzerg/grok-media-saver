@@ -17,6 +17,14 @@ export type VerifyConfig = DatabaseConfig & {
   archiveRoot: string;
 };
 
+export type SaveConfig = VerifyConfig & InspectConfig;
+
+export function readSaveConfig(
+  env: Record<string, string | undefined>,
+): SaveConfig {
+  return { ...readVerifyConfig(env), ...readInspectConfig(env) };
+}
+
 export function readDatabaseConfig(
   env: Record<string, string | undefined>,
 ): DatabaseConfig {
