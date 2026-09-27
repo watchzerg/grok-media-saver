@@ -105,6 +105,16 @@ export async function downloadToTemp(
   let sawChunk = false;
   let timeoutReason: string | undefined;
   const controller = new AbortController();
+  let rejectStopped!: (error: Error) => void;
+  const stopped = new Promise<never>((_, reject) => {
+    rejectStopped = reject;
+  });
+  void stopped.catch(() => {});
+  controller.signal.addEventListener(
+    "abort",
+    () => rejectStopped(new Error("媒体传输已停止。")),
+    { once: true },
+  );
   const onAbort = () => controller.abort();
   signal.addEventListener("abort", onAbort, { once: true });
   if (signal.aborted) controller.abort();
@@ -190,6 +200,7 @@ export async function downloadToTemp(
         if (!sawChunk) {
           sawChunk = true;
           if (firstTimer) clearTimeout(firstTimer);
+          resetProgress();
           onStage?.("写入媒体");
         }
         if (count + chunk.length > expected)
@@ -201,11 +212,10 @@ export async function downloadToTemp(
           ]);
         let offset = 0;
         while (offset < chunk.length) {
-          const { bytesWritten } = await file.write(
-            chunk,
-            offset,
-            chunk.length - offset,
-          );
+          const { bytesWritten } = await Promise.race([
+            file.write(chunk, offset, chunk.length - offset),
+            stopped,
+          ]);
           if (bytesWritten <= 0)
             throw new FatalMediaError("媒体文件发生短写。");
           offset += bytesWritten;
@@ -223,7 +233,11 @@ export async function downloadToTemp(
     if (!format.signature(firstBytes))
       throw new RetryableMediaError("媒体文件头与所选类型不符。");
     await file.sync();
-    await file.close();
+    try {
+      await file.close();
+    } catch (error) {
+      throw new FatalMediaError("媒体临时文件句柄关闭失败。", { cause: error });
+    }
     closed = true;
     const hasher = new Bun.CryptoHasher("sha256");
     for await (const chunk of createReadStream(path)) hasher.update(chunk);
@@ -259,12 +273,39 @@ export async function downloadToTemp(
     clearTimeout(totalTimer);
     if (firstTimer) clearTimeout(firstTimer);
     if (progressTimer) clearTimeout(progressTimer);
-    if (!closed) await file.close().catch(() => undefined);
-    if (!intentCreated)
+    let closeError: unknown;
+    if (!closed) {
+      let closeTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          file.close(),
+          new Promise<never>(
+            (_, reject) =>
+              (closeTimer = setTimeout(
+                () => reject(new Error("文件句柄关闭超过 5 秒。")),
+                5_000,
+              )),
+          ),
+        ]);
+      } catch (error) {
+        closeError = error;
+      } finally {
+        if (closeTimer) clearTimeout(closeTimer);
+      }
+    }
+    if (!intentCreated && !closeError)
       await unlink(path).catch((error) => {
         throw new FatalMediaError("未能清理本次下载残片。", { cause: error });
       });
+    if (closeError) reportUnconfirmedFileClose(closeError);
   }
+}
+
+function reportUnconfirmedFileClose(error: unknown): never {
+  throw new UnconfirmedStopError(
+    "媒体临时文件句柄关闭失败；停止状态无法确认，已保留残片且不会重试。",
+    { cause: error },
+  );
 }
 
 export async function discardDownloadedTemp(

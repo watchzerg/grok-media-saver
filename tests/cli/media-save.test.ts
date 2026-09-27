@@ -1,5 +1,5 @@
-import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import { mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -216,6 +216,106 @@ test("S1 retries a truncated response after rereading detail, then commits only 
   >`SELECT status, selected_key FROM post_work WHERE post_id = ${postId}`;
   expect(work?.status).toBe("saved");
   expect(work?.selected_key).toContain("image-2");
+});
+
+test("S1 times out a stalled first file write and cleans the owned fragment", async () => {
+  const config = await setup();
+  config.mediaNoProgressTimeoutSeconds = 0.02;
+  const probe = await open(join(config.archiveRoot, "write-probe"), "w");
+  const write = spyOn(Object.getPrototypeOf(probe), "write").mockImplementation(
+    () => new Promise(() => {}),
+  );
+  await probe.close();
+  let transfers = 0;
+  try {
+    const result = await saveSelectedPost(
+      config,
+      postId,
+      new AbortController().signal,
+      undefined,
+      async () => ({
+        getPostDetail: async () => ({
+          kind: "post",
+          selection: {
+            assetId: postId,
+            key: "https://assets.grok.com/image.png",
+            mimeType: "image/png",
+            quality: "image",
+          },
+        }),
+        downloadMedia: async (_selection, onResponse, onChunk) => {
+          transfers += 1;
+          await onResponse({
+            status: 200,
+            contentType: "image/png",
+            contentLength: String(png.length),
+            contentEncoding: null,
+          });
+          await onChunk(png);
+        },
+        close: async () => {},
+      }),
+    );
+    expect(result.status).toBe("failed");
+    expect(result.message).toContain("没有进展");
+    expect(transfers).toBe(2);
+    expect(
+      await (await import("node:fs/promises")).readdir(
+        join(config.archiveRoot, postId),
+      ),
+    ).toEqual([]);
+  } finally {
+    write.mockRestore();
+  }
+});
+
+test("S1 stops retrying and reports an unconfirmed file close", async () => {
+  const config = await setup();
+  const probe = await open(join(config.archiveRoot, "close-probe"), "w");
+  const realClose = probe.close;
+  await probe.close();
+  let transfers = 0;
+  const failingClose = spyOn(
+    Object.getPrototypeOf(probe),
+    "close",
+  ).mockImplementation(async function (this: typeof probe) {
+    await realClose.call(this);
+    throw new Error("fixture close failed");
+  });
+  try {
+    const result = await saveSelectedPost(
+      config,
+      postId,
+      new AbortController().signal,
+      undefined,
+      async () => ({
+        getPostDetail: async () => ({
+          kind: "post",
+          selection: {
+            assetId: postId,
+            key: "https://assets.grok.com/image.png",
+            mimeType: "image/png",
+            quality: "image",
+          },
+        }),
+        downloadMedia: async (_selection, onResponse) => {
+          transfers += 1;
+          await onResponse({
+            status: 503,
+            contentType: "text/plain",
+            contentLength: null,
+            contentEncoding: null,
+          });
+        },
+        close: async () => {},
+      }),
+    );
+    expect(result.status).toBe("failed");
+    expect(result.message).toContain("关闭失败");
+    expect(transfers).toBe(1);
+  } finally {
+    failingClose.mockRestore();
+  }
 });
 
 test.each([

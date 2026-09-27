@@ -118,37 +118,6 @@ export async function connectBrowserSession(
       const mediaPage = page;
       const binding = `gmsMedia${crypto.randomUUID().replaceAll("-", "")}`;
       let sinkError: unknown;
-      await mediaPage.exposeBinding(binding, async (_source, payload) => {
-        try {
-          if (!payload || typeof payload !== "object")
-            throw new Error("媒体流消息无效。");
-          const message = payload as {
-            kind: string;
-            status?: number;
-            contentType?: string;
-            contentLength?: string | null;
-            contentEncoding?: string | null;
-            retryAfter?: string | null;
-            finalUrl?: string;
-            bytes?: number[];
-          };
-          if (message.kind === "response") {
-            await onResponse({
-              status: message.status ?? 0,
-              contentType: message.contentType ?? "",
-              contentLength: message.contentLength ?? null,
-              contentEncoding: message.contentEncoding ?? null,
-              retryAfter: message.retryAfter,
-              finalUrl: message.finalUrl,
-            });
-          } else if (message.kind === "chunk" && Array.isArray(message.bytes)) {
-            await onChunk(Uint8Array.from(message.bytes));
-          } else throw new Error("媒体流消息无效。");
-        } catch (error) {
-          sinkError = error;
-          throw error;
-        }
-      });
       let rejectStopped!: (error: Error) => void;
       const stopped = new Promise<never>((_, reject) => {
         rejectStopped = reject;
@@ -168,6 +137,47 @@ export async function connectBrowserSession(
       signal.addEventListener("abort", onAbort, { once: true });
       if (signal.aborted) onAbort();
       try {
+        await Promise.race([
+          mediaPage.exposeBinding(binding, async (_source, payload) => {
+            try {
+              if (!payload || typeof payload !== "object")
+                throw new Error("媒体流消息无效。");
+              const message = payload as {
+                kind: string;
+                status?: number;
+                contentType?: string;
+                contentLength?: string | null;
+                contentEncoding?: string | null;
+                retryAfter?: string | null;
+                finalUrl?: string;
+                bytes?: number[];
+              };
+              if (message.kind === "response") {
+                await onResponse({
+                  status: message.status ?? 0,
+                  contentType: message.contentType ?? "",
+                  contentLength: message.contentLength ?? null,
+                  contentEncoding: message.contentEncoding ?? null,
+                  retryAfter: message.retryAfter,
+                  finalUrl: message.finalUrl,
+                });
+              } else if (
+                message.kind === "chunk" &&
+                Array.isArray(message.bytes)
+              ) {
+                await onChunk(Uint8Array.from(message.bytes));
+              } else throw new Error("媒体流消息无效。");
+            } catch (error) {
+              sinkError = error;
+              throw error;
+            }
+          }),
+          stopped,
+        ]);
+        if (signal.aborted) {
+          await closeOwnedPage();
+          throw new Error("媒体请求已停止。");
+        }
         onRequestStart();
         await Promise.race([
           mediaPage.evaluate(
