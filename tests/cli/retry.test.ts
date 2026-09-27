@@ -1005,35 +1005,165 @@ test("retry CLI reports only confirmed progress after a save commit loses its re
   }
 });
 
+test("retry shares nonzero pacing across failed Posts, detail retries and media requests", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-pacing-"));
+  const first = "123e4567-e89b-42d3-a456-426614174000";
+  const second = "123e4567-e89b-42d3-a456-426614174001";
+  const third = "123e4567-e89b-42d3-a456-426614174002";
+  const eventsPath = join(root, "requests.jsonl");
+  try {
+    await testSql`INSERT INTO post_work (post_id,status) VALUES (${first},'pending'),(${second},'pending'),(${third},'pending')`;
+    const result = await runFakeRetry({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      GROK_API_INTERVAL_MIN_SECONDS: "0.15",
+      GROK_API_INTERVAL_MAX_SECONDS: "0.15",
+      GMS_TEST_REQUEST_EVENTS: eventsPath,
+      GMS_TEST_UNAVAILABLE_ID: first,
+      GMS_TEST_RETRY_DETAIL: "1",
+      GMS_TEST_RETRY_MEDIA_ID: second,
+      GMS_TEST_MEDIA: "1",
+    });
+    expect(result.exitCode, result.stderr).toBe(1);
+    expect(result.stderr).toContain("已保存 2，失败 1，未处理 0");
+    const events: { kind: string; postId: string; at: number }[] = (
+      await readFile(eventsPath, "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(events.map(({ kind, postId }) => [kind, postId])).toEqual([
+      ["detail", first],
+      ["detail", second],
+      ["detail", second],
+      ["media", second],
+      ["detail", second],
+      ["media", second],
+      ["detail", third],
+      ["detail", third],
+      ["media", third],
+    ]);
+    for (let index = 1; index < events.length; index += 1) {
+      const previous = events[index - 1];
+      const current = events[index];
+      if (!previous || !current) throw new Error("缺少请求时间证据");
+      expect(
+        current.at - previous.at,
+        `${previous.kind} ${previous.postId} → ${current.kind} ${current.postId}`,
+      ).toBeGreaterThanOrEqual(140);
+    }
+    const [run] = await testSql<
+      { outcome: string; summary: unknown }[]
+    >`SELECT outcome,summary FROM runs WHERE command='retry'`;
+    expect(run).toEqual({
+      outcome: "failed",
+      summary: { saved: 2, failed: 1, unprocessed: 0 },
+    });
+    const works = await testSql<
+      { status: string }[]
+    >`SELECT status FROM post_work ORDER BY post_id`;
+    expect(works.map((work) => work.status)).toEqual([
+      "failed",
+      "saved",
+      "saved",
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("SIGINT cancels retry pacing before the next Post opens a browser request", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-pacing-stop-"));
+  const first = "123e4567-e89b-42d3-a456-426614174000";
+  const second = "123e4567-e89b-42d3-a456-426614174001";
+  const eventsPath = join(root, "requests.jsonl");
+  await writeFile(eventsPath, "");
+  await testSql`INSERT INTO post_work (post_id,status) VALUES (${first},'pending'),(${second},'pending')`;
+  const child = startFakeRetry({
+    ...databaseEnv,
+    GROK_ARCHIVE_DIR: root,
+    GROK_API_INTERVAL_MIN_SECONDS: "5",
+    GROK_API_INTERVAL_MAX_SECONDS: "5",
+    GMS_TEST_REQUEST_EVENTS: eventsPath,
+    GMS_TEST_UNAVAILABLE_ID: first,
+    GMS_TEST_MEDIA: "1",
+  });
+  const resultPromise = collectCli(child);
+  try {
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      const [work] = await testSql<
+        { status: string }[]
+      >`SELECT status FROM post_work WHERE post_id=${first}`;
+      if (work?.status === "failed") break;
+      await Bun.sleep(10);
+    }
+    await Bun.sleep(100);
+    const stoppedAt = Date.now();
+    child.kill("SIGINT");
+    const result = await resultPromise;
+    expect(Date.now() - stoppedAt).toBeLessThan(2000);
+    expect(result.exitCode, result.stderr).toBe(130);
+    expect(result.stderr).toContain("已保存 0，失败 1，未处理 1");
+    const events: { kind: string; postId: string }[] = (
+      await readFile(eventsPath, "utf8")
+    )
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(events.map(({ kind, postId }) => [kind, postId])).toEqual([
+      ["detail", first],
+    ]);
+    const [work] = await testSql<
+      { status: string; last_run_id: string | null }[]
+    >`SELECT status,last_run_id FROM post_work WHERE post_id=${second}`;
+    expect(work).toEqual({ status: "pending", last_run_id: null });
+    const [run] = await testSql<
+      { outcome: string; summary: unknown }[]
+    >`SELECT outcome,summary FROM runs WHERE command='retry'`;
+    expect(run).toEqual({
+      outcome: "stopped",
+      summary: { saved: 0, failed: 1, unprocessed: 1 },
+    });
+  } finally {
+    if (child.exitCode === null) child.kill("SIGKILL");
+    await resultPromise;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 async function runFakeRetry(env: Record<string, string>) {
-  return collectCli(
-    Bun.spawn(
-      [
-        process.execPath,
-        "--no-env-file",
-        "--preload",
-        "./tests/helpers/fake-save-browser.ts",
-        ...(env.GMS_TEST_DATABASE_CLOSE_FAILURE === "1"
-          ? ["--preload", "./tests/helpers/fail-retry-db-close.ts"]
-          : []),
-        ...(env.GMS_TEST_LOSE_SAVE_RECEIPT === "1"
-          ? ["--preload", "./tests/helpers/lose-save-receipt.ts"]
-          : []),
-        "src/cli.ts",
-        "retry",
-      ],
-      {
-        cwd: process.cwd(),
-        env: {
-          ...env,
-          PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
-          GROK_API_INTERVAL_MIN_SECONDS: "0",
-          GROK_API_INTERVAL_MAX_SECONDS: "0",
-        },
-        stdout: "pipe",
-        stderr: "pipe",
+  return collectCli(startFakeRetry(env));
+}
+
+function startFakeRetry(env: Record<string, string>) {
+  return Bun.spawn(
+    [
+      process.execPath,
+      "--no-env-file",
+      "--preload",
+      "./tests/helpers/fake-save-browser.ts",
+      ...(env.GMS_TEST_DATABASE_CLOSE_FAILURE === "1"
+        ? ["--preload", "./tests/helpers/fail-retry-db-close.ts"]
+        : []),
+      ...(env.GMS_TEST_LOSE_SAVE_RECEIPT === "1"
+        ? ["--preload", "./tests/helpers/lose-save-receipt.ts"]
+        : []),
+      "src/cli.ts",
+      "retry",
+    ],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...env,
+        PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+        GROK_API_INTERVAL_MIN_SECONDS: env.GROK_API_INTERVAL_MIN_SECONDS ?? "0",
+        GROK_API_INTERVAL_MAX_SECONDS: env.GROK_API_INTERVAL_MAX_SECONDS ?? "0",
       },
-    ),
+      stdout: "pipe",
+      stderr: "pipe",
+    },
   );
 }
 

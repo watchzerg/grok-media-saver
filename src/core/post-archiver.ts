@@ -220,8 +220,6 @@ export async function archivePost({
           return;
         }
         if (error instanceof RetryableMediaError && attempt < 2) {
-          await waitBeforeRetry(signal);
-          await store.assertLock();
           const next = await readCurrentDetail();
           if (next.kind === "blocked") {
             result.status = "blocked";
@@ -290,6 +288,9 @@ export async function archivePost({
   async function readCurrentDetail(): Promise<PostResponse> {
     for (let attempt = 1; ; attempt += 1) {
       if (signal.aborted) throw new Error("保存已停止。");
+      await waitBeforeRetry(signal);
+      await store.assertLock();
+      if (signal.aborted) throw new Error("保存已停止。");
       let detail: PostResponse;
       try {
         detail = await getDetail(signal);
@@ -301,14 +302,10 @@ export async function archivePost({
           throw error;
         }
         if (!(error instanceof RetryableRequestError)) throw error;
-        await waitBeforeRetry(signal);
-        await store.assertLock();
         continue;
       }
       if (signal.aborted) throw new Error("保存已停止。");
       if (detail.kind !== "temporary" || attempt >= 2) return detail;
-      await waitBeforeRetry(signal);
-      await store.assertLock();
     }
   }
 }

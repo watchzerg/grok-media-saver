@@ -9,11 +9,20 @@ import {
 mock.module("../../src/browser/session.ts", () => ({
   connectBrowserSession: async (_url: string, requestStarted: () => void) => {
     let attempts = 0;
+    let mediaAttempts = 0;
+    const recordRequest = (kind: string, postId: string) => {
+      requestStarted();
+      if (process.env.GMS_TEST_REQUEST_EVENTS)
+        appendFileSync(
+          process.env.GMS_TEST_REQUEST_EVENTS,
+          `${JSON.stringify({ kind, postId, at: Date.now() })}\n`,
+        );
+    };
     let currentPostId = "";
     return {
       getPostDetail: async (postId: string) => {
         currentPostId = postId;
-        requestStarted();
+        recordRequest("detail", postId);
         attempts += 1;
         if (process.env.GMS_TEST_DETAIL_IDS)
           appendFileSync(process.env.GMS_TEST_DETAIL_IDS, `${postId}\n`);
@@ -73,7 +82,11 @@ mock.module("../../src/browser/session.ts", () => ({
               onResponse: (headers: unknown) => Promise<void>,
               onChunk: (chunk: Uint8Array) => Promise<void>,
             ) => {
+              recordRequest("media", currentPostId);
+              mediaAttempts += 1;
               if (
+                (process.env.GMS_TEST_RETRY_MEDIA_ID === currentPostId &&
+                  mediaAttempts === 1) ||
                 process.env.GMS_TEST_MEDIA_RETRY_DETAIL_FAILURE_ID ===
                   currentPostId ||
                 process.env.GMS_TEST_MEDIA_RETRY_BLOCKED_ID === currentPostId
