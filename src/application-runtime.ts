@@ -102,6 +102,7 @@ export async function retryUnfinishedPosts(
   signal?: AbortSignal,
   prepareSave?: () => SaveConfig,
   connect?: SavePostOptions["connect"],
+  onStage?: SavePostOptions["onStage"],
 ): Promise<RetryResult> {
   let sql: ReturnType<typeof connectDatabase> | undefined;
   let session:
@@ -282,6 +283,7 @@ export async function retryUnfinishedPosts(
                       session,
                       {
                         signal,
+                        onStage,
                         waitBeforeRetry: scheduler.beforeRequest,
                         connect:
                           connect ??

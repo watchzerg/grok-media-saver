@@ -115,6 +115,8 @@ export async function main(
         undefined,
         controller.signal,
         () => readSaveConfig(env),
+        undefined,
+        (stage) => console.log(`阶段：${stage}。`),
       );
       if (result.status === "ok") console.log(result.message);
       else console.error(result.message);

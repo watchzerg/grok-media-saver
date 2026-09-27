@@ -43,7 +43,7 @@ mise exec -- bun src/cli.ts status
 
 ## 重试未完成 Post
 
-`retry` 通过 PostgreSQL 会话锁避免同一数据库上的并发写入。启动时固定 `pending`、`finalizing`、`failed` Post 集合，按 Post ID 顺序每项处理一次；不依赖当前 Saved 第一页，也不纳入执行期间新增的 Post。每项复用指定 Post 的发布恢复、当前来源核对和图片/视频保存路径。普通单 Post 失败继续，限流、停止、丢锁或基础资源故障停止后续目标。终端及正常收尾的 Run 摘要显示已保存、失败和未处理数量；有失败或未处理时退出 `1`，首次 Ctrl+C 退出 `130`。空集合只需要项目数据库配置，成功收尾且不连接浏览器；非空集合还需要归档目录、Extension token 和保存用配置。Run 写入失去回执时，命令不推断其结果或声称已记账。
+`retry` 通过 PostgreSQL 会话锁避免同一数据库上的并发写入。启动时固定 `pending`、`finalizing`、`failed` Post 集合，按 Post ID 顺序每项处理一次；不依赖当前 Saved 第一页，也不纳入执行期间新增的 Post。每项复用指定 Post 的发布恢复、当前来源核对和图片/视频保存路径。普通单 Post 失败继续，限流、停止、丢锁或基础资源故障停止后续目标。处理非空集合时终端显示当前阶段；终端及正常收尾的 Run 摘要显示已保存、失败和未处理数量。有失败或未处理时退出 `1`，首次 Ctrl+C 退出 `130`。空集合只需要项目数据库配置，成功收尾且不连接浏览器；非空集合还需要归档目录、Extension token 和保存用配置。Run 写入失去回执时，命令不推断其结果或声称已记账。
 
 ```sh
 mise exec -- bun src/cli.ts retry

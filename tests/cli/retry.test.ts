@@ -25,6 +25,7 @@ test("retry records a successful empty run without connecting to the browser", a
   const result = await runCli(databaseEnv, ["retry"]);
   expect(result.exitCode, JSON.stringify(result)).toBe(0);
   expect(result.stdout).toContain("没有未完成 Post");
+  expect(result.stdout).not.toContain("阶段：");
   expect(result.stderr).toBe("");
 
   const [run] = await testSql<
@@ -195,7 +196,16 @@ test("retry saves a failed Post through the CLI and records its result", async (
       ),
     );
     expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stdout).toContain("阶段：读取当前详情。");
+    expect(result.stdout).toContain("阶段：下载当前媒体。");
+    expect(result.stdout.indexOf("阶段：读取当前详情。")).toBeLessThan(
+      result.stdout.indexOf("已保存 1"),
+    );
     expect(result.stdout).toContain("已保存 1");
+    expect(`${result.stdout}${result.stderr}`).not.toContain("fixture-token");
+    expect(`${result.stdout}${result.stderr}`).not.toContain(
+      databaseEnv.GROK_DB_PASSWORD,
+    );
     const [run] = await testSql<
       { finished_at: Date | null; outcome: string | null; summary: unknown }[]
     >`SELECT finished_at, outcome, summary FROM runs`;
