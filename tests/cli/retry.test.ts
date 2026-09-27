@@ -6,7 +6,7 @@ import {
   initializeProjectDatabase,
   retryUnfinishedPosts,
 } from "../../src/application-runtime";
-import { readDatabaseConfig } from "../../src/config";
+import { readDatabaseConfig, readSaveConfig } from "../../src/config";
 import { databaseEnv, testSql, useIsolatedPostgres } from "../helpers/postgres";
 
 useIsolatedPostgres();
@@ -272,6 +272,74 @@ test("retry fixes its initial set, continues ordinary failure, and saves image a
   }
 });
 
+test("retry continues after a Post detail network failure exhausts its retry", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-network-"));
+  const first = "123e4567-e89b-42d3-a456-426614174000";
+  const second = "123e4567-e89b-42d3-a456-426614174001";
+  const detailLog = join(root, "details.txt");
+  try {
+    await testSql`INSERT INTO post_work (post_id,status) VALUES (${first},'pending'),(${second},'pending')`;
+    const result = await runFakeRetry({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      GMS_TEST_MEDIA: "1",
+      GMS_TEST_DETAIL_IDS: detailLog,
+      GMS_TEST_NETWORK_FAILURE_ID: first,
+    });
+    expect(result.exitCode, result.stderr).toBe(1);
+    expect(result.stderr).toContain("已保存 1，失败 1，未处理 0");
+    expect((await readFile(detailLog, "utf8")).trim().split("\n")).toEqual([
+      first,
+      first,
+      second,
+    ]);
+    const [later] = await testSql<{ status: string }[]>`
+      SELECT status FROM post_work WHERE post_id=${second}`;
+    expect(later?.status).toBe("saved");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("retry continues after a finalizing Post conflicts with its published file", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-conflict-"));
+  const first = "123e4567-e89b-42d3-a456-426614174000";
+  const second = "123e4567-e89b-42d3-a456-426614174001";
+  const bytes = Buffer.from(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489",
+    "hex",
+  );
+  const digest = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+  const relative = `${first}/${digest}.png`;
+  try {
+    await mkdir(join(root, first));
+    await writeFile(join(root, relative), "conflicting content");
+    await testSql`
+      INSERT INTO post_work (post_id,status,selected_key,quality,mime_type,
+        publish_temp_name,publish_relative_path,publish_expected_bytes,publish_sha256)
+      VALUES (${first},'finalizing','https://assets.grok.com/source.png','image','image/png',
+        '.retry-conflict.part',${relative},${bytes.length},${digest})`;
+    await testSql`INSERT INTO post_work (post_id,status) VALUES (${second},'pending')`;
+    const result = await runFakeRetry({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      GMS_TEST_MEDIA: "1",
+    });
+    expect(result.exitCode, result.stderr).toBe(1);
+    expect(result.stderr).toContain("已保存 1，失败 1，未处理 0");
+    expect(await readFile(join(root, relative), "utf8")).toBe(
+      "conflicting content",
+    );
+    const works = await testSql<{ status: string }[]>`
+      SELECT status FROM post_work ORDER BY post_id`;
+    expect(works.map(({ status }) => status)).toEqual(["finalizing", "saved"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("retry stops after a blocked Post and leaves later work untouched", async () => {
   await resetSchema();
   const root = await mkdtemp(join(tmpdir(), "gms-retry-blocked-"));
@@ -358,6 +426,7 @@ test("SIGINT during nonempty retry leaves later members unprocessed", async () =
       GMS_TEST_MEDIA: "1",
     });
     expect(result.exitCode).toBe(130);
+    expect(result.stderr).toContain("已保存 0，失败 0，未处理 2");
     const [later] = await testSql<
       { status: string; last_run_id: string | null }[]
     >`
@@ -369,6 +438,56 @@ test("SIGINT during nonempty retry leaves later members unprocessed", async () =
       outcome: "stopped",
       summary: { saved: 0, failed: 0, unprocessed: 2 },
     });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("SIGINT after one saved Post reports completed and unprocessed counts", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-stop-counts-"));
+  const first = "123e4567-e89b-42d3-a456-426614174000";
+  const second = "123e4567-e89b-42d3-a456-426614174001";
+  try {
+    await testSql`INSERT INTO post_work (post_id,status) VALUES (${first},'pending'),(${second},'pending')`;
+    const result = await runFakeRetry({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      GMS_TEST_MEDIA: "1",
+      GMS_TEST_ABORT_DETAIL_ID: second,
+    });
+    expect(result.exitCode).toBe(130);
+    expect(result.stderr).toContain("已保存 1，失败 0，未处理 1");
+    const [run] = await testSql<{ outcome: string; summary: unknown }[]>`
+      SELECT outcome,summary FROM runs WHERE command='retry'`;
+    expect(run).toEqual({
+      outcome: "stopped",
+      summary: { saved: 1, failed: 0, unprocessed: 1 },
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("SIGINT during retry reports a browser cleanup error with the known counts", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-stop-cleanup-"));
+  const first = "123e4567-e89b-42d3-a456-426614174000";
+  const second = "123e4567-e89b-42d3-a456-426614174001";
+  try {
+    await testSql`INSERT INTO post_work (post_id,status) VALUES (${first},'pending'),(${second},'pending')`;
+    const result = await runFakeRetry({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      GMS_TEST_ABORT_DETAIL: "1",
+      GMS_TEST_CLOSE_FAILURE: "1",
+      GMS_TEST_MEDIA: "1",
+    });
+    expect(result.exitCode).toBe(130);
+    expect(result.stderr).toContain("已保存 0，失败 0，未处理 2");
+    expect(result.stderr).toContain(
+      "浏览器清理失败：simulated browser close failure",
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -608,6 +727,52 @@ test("stopped retry keeps exit classification and reports cleanup failure separa
     expect(run?.summary).toBeNull();
   } finally {
     await dropRetryDelayTrigger();
+  }
+});
+
+test("retry application result retains browser cleanup failure and known counts on stop", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-app-stop-"));
+  const first = "123e4567-e89b-42d3-a456-426614174000";
+  const second = "123e4567-e89b-42d3-a456-426614174001";
+  const controller = new AbortController();
+  try {
+    await testSql`INSERT INTO post_work (post_id,status) VALUES (${first},'pending'),(${second},'pending')`;
+    const result = await retryUnfinishedPosts(
+      readDatabaseConfig(databaseEnv),
+      async (sql, timeoutSeconds) => sql.close({ timeout: timeoutSeconds }),
+      controller.signal,
+      () =>
+        readSaveConfig({
+          ...databaseEnv,
+          GROK_ARCHIVE_DIR: root,
+          PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+          GROK_API_INTERVAL_MIN_SECONDS: "0",
+          GROK_API_INTERVAL_MAX_SECONDS: "0",
+        }),
+      async () => ({
+        getPostDetail: async () => {
+          controller.abort();
+          return { kind: "unavailable", status: 404 };
+        },
+        close: async () => {
+          throw new Error("simulated browser cleanup failure");
+        },
+      }),
+    );
+    expect(result.status).toBe("cancelled");
+    expect(result.message).toContain("已保存 0，失败 0，未处理 2");
+    expect(result.cleanupErrors).toEqual([
+      "浏览器清理失败：simulated browser cleanup failure",
+    ]);
+    const [run] = await testSql<{ outcome: string; summary: unknown }[]>`
+      SELECT outcome,summary FROM runs WHERE command='retry'`;
+    expect(run).toEqual({
+      outcome: "stopped",
+      summary: { saved: 0, failed: 0, unprocessed: 2 },
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 

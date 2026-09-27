@@ -1,6 +1,9 @@
 import { mock } from "bun:test";
 import { appendFileSync } from "node:fs";
-import { parsePostDetailResponse } from "../../src/grok/adapter";
+import {
+  parsePostDetailResponse,
+  RetryableRequestError,
+} from "../../src/grok/adapter";
 
 mock.module("../../src/browser/session.ts", () => ({
   connectBrowserSession: async (_url: string, requestStarted: () => void) => {
@@ -13,10 +16,15 @@ mock.module("../../src/browser/session.ts", () => ({
           appendFileSync(process.env.GMS_TEST_DETAIL_IDS, `${postId}\n`);
         if (process.env.GMS_TEST_REQUEST_TIMES)
           appendFileSync(process.env.GMS_TEST_REQUEST_TIMES, `${Date.now()}\n`);
-        if (process.env.GMS_TEST_ABORT_DETAIL === "1") {
+        if (
+          process.env.GMS_TEST_ABORT_DETAIL === "1" ||
+          process.env.GMS_TEST_ABORT_DETAIL_ID === postId
+        ) {
           process.kill(process.pid, "SIGINT");
           await Bun.sleep(20);
         }
+        if (process.env.GMS_TEST_NETWORK_FAILURE_ID === postId)
+          throw new RetryableRequestError("simulated detail network failure");
         return parsePostDetailResponse(postId, {
           status:
             process.env.GMS_TEST_BLOCKED === "1" ||

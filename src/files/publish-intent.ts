@@ -3,6 +3,8 @@ import { link, lstat, open, realpath, unlink } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { checkArchiveFile } from "./verify";
 
+export class PublishConflictError extends Error {}
+
 type PublishIntent = {
   mimeType: string | null;
   sha256: string | null;
@@ -163,7 +165,7 @@ export async function publishIntent(
     onStage?.("正式文件已发布");
   }
   if (final.status !== "ok")
-    throw new Error("正式文件与发布意图冲突，现场已保留。");
+    throw new PublishConflictError("正式文件与发布意图冲突，现场已保留。");
   if (signal.aborted && !publicationStarted)
     throw new Error("保存已停止；发布意图已保留。");
   onStage?.("同步正式文件");

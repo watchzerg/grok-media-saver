@@ -13,7 +13,9 @@ import type {
   SaveConfig,
   VerifyConfig,
 } from "./config";
+import { PublishConflictError } from "./files/publish-intent";
 import { checkArchiveFile } from "./files/verify";
+import { RetryableRequestError } from "./grok/adapter";
 import { createRequestScheduler } from "./grok/request-scheduler";
 import { connectDatabase, safeDatabaseError } from "./store/database";
 import {
@@ -112,6 +114,8 @@ export async function retryUnfinishedPosts(
   let runWriteUnknown = false;
   let invalidConfig = false;
   const counts = { saved: 0, failed: 0, unprocessed: 0 };
+  let countsKnown = false;
+  const postErrors: string[] = [];
   let result: RetryResult = {
     status: "failed",
     message: "重试执行失败。",
@@ -189,6 +193,7 @@ export async function retryUnfinishedPosts(
             ORDER BY post_id
           `;
           counts.unprocessed = targets.length;
+          countsKnown = true;
           await assertExecutorLock(session);
           let saveConfig: SaveConfig | undefined;
           if (targets.length) {
@@ -302,6 +307,19 @@ export async function retryUnfinishedPosts(
                     );
                   } catch (error) {
                     if (runWriteUnknown) throw error;
+                    if (
+                      !signal?.aborted &&
+                      result.cleanupErrors.length === 0 &&
+                      (error instanceof RetryableRequestError ||
+                        error instanceof PublishConflictError)
+                    ) {
+                      counts.unprocessed -= 1;
+                      counts.failed += 1;
+                      postErrors.push(
+                        `Post ${target.postId} 失败：${safeSaveError(error, saveConfig)}`,
+                      );
+                      continue;
+                    }
                     stopReason = safeSaveError(error, saveConfig);
                     break;
                   }
@@ -339,14 +357,14 @@ export async function retryUnfinishedPosts(
                 ? {
                     status: "cancelled",
                     message: "收到停止信号；Run 已正常收尾。",
-                    cleanupErrors: [],
+                    cleanupErrors: result.cleanupErrors,
                   }
                 : {
                     status:
                       counts.failed || counts.unprocessed || stopReason
                         ? "failed"
                         : "ok",
-                    message: `${targets.length ? "重试结束" : "没有未完成 Post，重试 Run 已正常结束"}：已保存 ${counts.saved}，失败 ${counts.failed}，未处理 ${counts.unprocessed}。${stopReason ? ` ${stopReason}` : ""}`,
+                    message: `${targets.length ? "重试结束" : "没有未完成 Post，重试 Run 已正常结束"}：已保存 ${counts.saved}，失败 ${counts.failed}，未处理 ${counts.unprocessed}。${[...postErrors, stopReason].filter(Boolean).join(" ")}`,
                     cleanupErrors: result.cleanupErrors,
                   };
             }
@@ -362,7 +380,7 @@ export async function retryUnfinishedPosts(
       result = {
         status: "cancelled",
         message: "重试已停止。",
-        cleanupErrors: [],
+        cleanupErrors: result.cleanupErrors,
       };
       if (
         runId &&
@@ -458,6 +476,8 @@ export async function retryUnfinishedPosts(
     result.status = "cancelled";
     if (!result.message.includes("停止"))
       result.message = "收到停止信号；Run 已完成必要收尾。";
+    if (countsKnown && !result.message.includes("未处理"))
+      result.message = `${result.message} 已保存 ${counts.saved}，失败 ${counts.failed}，未处理 ${counts.unprocessed}。`;
   }
   return result;
 }
