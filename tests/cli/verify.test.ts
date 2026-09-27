@@ -96,13 +96,16 @@ test("verify reports current-directory file anomalies without changing facts", a
 
     for (const [name, relativePath, expectedText] of cases) {
       await setVersionPath(relativePath);
+      const before = await readPersistedFacts();
       const result = await runCli(
         { ...databaseEnv, GROK_ARCHIVE_DIR: archiveRoot },
         ["verify", postId],
       );
+      const after = await readPersistedFacts();
       expect(result.exitCode, `${name}: ${JSON.stringify(result)}`).toBe(1);
       expect(result.stdout).toContain(expectedText);
       expect(result.stderr).toBe("");
+      expect(after).toEqual(before);
     }
 
     await setVersionPath(validPath);
@@ -150,6 +153,27 @@ test("verify reports input and configuration errors before resource startup", as
   const missingArchive = await runCli(databaseEnv, ["verify", postId]);
   expect(missingArchive.exitCode).toBe(2);
   expect(missingArchive.stderr).toContain("GROK_ARCHIVE_DIR");
+
+  const archiveRoot = await mkdtemp(join(tmpdir(), "gms-verify-config-"));
+  const secret = "verify-private-db-secret";
+  try {
+    const rejectedPassword = await runCli(
+      {
+        ...databaseEnv,
+        GROK_ARCHIVE_DIR: archiveRoot,
+        GROK_DB_PASSWORD: secret,
+      },
+      ["verify", postId],
+    );
+    expect(rejectedPassword.exitCode).toBe(1);
+    expect(rejectedPassword.stderr).not.toContain(secret);
+    expect(rejectedPassword.stdout).not.toContain(secret);
+    expect(rejectedPassword.stderr).not.toContain(
+      "PLAYWRIGHT_MCP_EXTENSION_TOKEN",
+    );
+  } finally {
+    await rm(archiveRoot, { recursive: true, force: true });
+  }
 });
 
 test("verify reports a Post without a saved version", async () => {
