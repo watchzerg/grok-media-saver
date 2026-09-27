@@ -10,7 +10,7 @@ import {
   safeSaveError,
   savePost,
 } from "./application-save-post";
-import { connectBrowserSession } from "./browser/session";
+import { type BrowserSession, connectBrowserSession } from "./browser/session";
 import type {
   DatabaseConfig,
   InspectConfig,
@@ -162,6 +162,7 @@ async function runBatch(
   let runWriteUnknown = false;
   let invalidConfig = false;
   let saveConfig: SaveConfig | undefined;
+  let runBrowserSession: BrowserSession | undefined;
   const counts = { saved: 0, failed: 0, unprocessed: 0 };
   let countsKnown = false;
   const postErrors: string[] = [];
@@ -282,6 +283,25 @@ async function runBatch(
             minSeconds: saveConfig?.requestIntervalMinSeconds ?? 0,
             maxSeconds: saveConfig?.requestIntervalMaxSeconds ?? 0,
           });
+          const connectRunSession = async (connectSignal: AbortSignal) => {
+            if (!saveConfig) throw new Error(`${label}缺少保存配置。`);
+            runBrowserSession ??= await connectBrowserSession(
+              saveConfig.savedPageUrl,
+              scheduler.requestStarted,
+              connectSignal,
+            );
+            const browser = runBrowserSession;
+            if (!browser.isConnected())
+              throw new Error("Chrome Extension 连接已断开。");
+            return {
+              getFirstPage: (requestSignal: AbortSignal) =>
+                browser.getFirstPage(requestSignal),
+              getPostDetail: (postId: string, requestSignal: AbortSignal) =>
+                browser.getPostDetail(postId, requestSignal),
+              downloadMedia: browser.downloadMedia,
+              close: () => browser.closePage(),
+            };
+          };
 
           if (signal?.aborted) {
             const stopped = await finishStoppedRun(
@@ -330,20 +350,12 @@ async function runBatch(
               let stopReason = "";
               if (command === "save-first-page" && !signal?.aborted) {
                 if (!saveConfig) throw new Error("单页保存缺少保存配置。");
-                const pageSaveConfig = saveConfig;
                 onStage?.("读取 Saved 第一页");
                 const page = await inspectFirstPage({
                   signal,
                   secrets: [saveConfig.extensionToken, config.password],
                   waitBeforeRetry: scheduler.beforeRequest,
-                  connect:
-                    connectPage ??
-                    ((connectSignal) =>
-                      connectBrowserSession(
-                        pageSaveConfig.savedPageUrl,
-                        scheduler.requestStarted,
-                        connectSignal,
-                      )),
+                  connect: connectPage ?? connectRunSession,
                 });
                 if (page.status === "ok") {
                   targets = page.assets.map((asset) => ({
@@ -361,7 +373,6 @@ async function runBatch(
               }
               if (targets.length && !stopReason && !signal?.aborted) {
                 if (!saveConfig) throw new Error(`${label}缺少保存配置。`);
-                const postSaveConfig = saveConfig;
                 for (const target of targets) {
                   if (signal?.aborted) break;
                   await assertExecutorLock(session);
@@ -378,14 +389,7 @@ async function runBatch(
                         signal,
                         onStage,
                         waitBeforeRetry: scheduler.beforeRequest,
-                        connect:
-                          connect ??
-                          ((connectSignal) =>
-                            connectBrowserSession(
-                              postSaveConfig.savedPageUrl,
-                              scheduler.requestStarted,
-                              connectSignal,
-                            )),
+                        connect: connect ?? connectRunSession,
                       },
                       async (operation) => {
                         runWriteUnknown = true;
@@ -439,6 +443,10 @@ async function runBatch(
                   if (browserResult.cleanupErrors.length) {
                     result.cleanupErrors.push(...browserResult.cleanupErrors);
                     stopReason = browserResult.cleanupErrors.join(" ");
+                    break;
+                  }
+                  if (runBrowserSession && !runBrowserSession.isConnected()) {
+                    stopReason = "Chrome Extension 连接已断开。";
                     break;
                   }
                   if (
@@ -549,6 +557,19 @@ async function runBatch(
     }
   }
 
+  if (runBrowserSession) {
+    try {
+      await runBrowserSession.close();
+    } catch (error) {
+      const detail = `浏览器清理失败：${saveConfig ? safeSaveError(error, saveConfig) : safeDatabaseError(error, config)}`;
+      result.cleanupErrors.push(detail);
+      if (result.status === "ok")
+        result.message = `${label} Run 已记录，但${detail}`;
+      if (result.status !== "cancelled") result.status = "failed";
+    }
+    if (runBrowserSession.cleanupNotices.length)
+      result.message = `${result.message} ${runBrowserSession.cleanupNotices.join(" ")}`;
+  }
   if (session) {
     if (lockAcquired) {
       try {

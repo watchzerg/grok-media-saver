@@ -6,7 +6,7 @@
 
 1. 在仓库运行 `just install`、`just gate-full`。完整门禁使用隔离 Docker PostgreSQL、临时目录和真实 CLI 子进程；宿主需要能运行 Docker 并取得 `postgres:18-alpine` 镜像。门禁不连接 Chrome 或 Grok。
 2. 为实际归档预先准备**独立于测试容器**的 PostgreSQL 数据库与归档目录。复制 `.env.example` 为 `.env`，填入 `GROK_DB_*`、`GROK_ARCHIVE_DIR`。环境变量优先于 `.env`。数据库密码、Extension token 和含 token 的连接页地址不进入提交、终端记录或验收材料。
-3. 在主 Chrome 的登录配置中保持 Grok 登录，并安装 Playwright Extension。为需要浏览器的命令提供 `PLAYWRIGHT_MCP_EXTENSION_TOKEN`。程序只附着既有 Chrome context，创建并关闭自己的 Saved 页；归属不明的 `connect.html` 会保留并提示人工核对，用户原有标签页由用户管理。
+3. 在主 Chrome 的登录配置中保持 Grok 登录，并安装 Playwright Extension。为需要浏览器的命令提供 `PLAYWRIGHT_MCP_EXTENSION_TOKEN`。程序只附着既有 Chrome context，按需建立一次连接并关闭自己的工作页；批量 Run 在各 Post 间复用连接。收尾时关闭能用本次随机标记唯一确认的 `connect.html`，归属不明或旧运行遗留的连接页仍保留并提示人工核对，用户原有标签页由用户管理。
 4. 对实际数据库运行 `mise exec -- bun src/cli.ts db init`。它只初始化当前 schema，不创建数据库；普通命令只读核对 schema，不自动迁移。改动归档根目录后，`verify` 只查新目录。
 
 ## 运行顺序

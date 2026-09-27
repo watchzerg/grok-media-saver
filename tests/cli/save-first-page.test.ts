@@ -86,6 +86,60 @@ test("S2 save first-page completes an empty page once", async () => {
   }
 });
 
+test("S2 save first-page reuses one browser connection across page and Posts", async () => {
+  await reset();
+  const root = await mkdtemp(join(tmpdir(), "gms-page-browser-run-"));
+  const events = join(root, "browser-events");
+  try {
+    const result = await run({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture",
+      GROK_API_INTERVAL_MIN_SECONDS: "0",
+      GROK_API_INTERVAL_MAX_SECONDS: "0",
+      GMS_TEST_PAGE_IDS: `${ids[0]},${ids[1]}`,
+      GMS_TEST_MEDIA: "1",
+      GMS_TEST_BROWSER_EVENTS: events,
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect((await readFile(events, "utf8")).trim().split("\n")).toEqual([
+      "connect",
+      "close-page",
+      "close-page",
+      "close-page",
+      "close",
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("S2 final browser close failure keeps the completed Run and exits nonzero", async () => {
+  await reset();
+  const root = await mkdtemp(join(tmpdir(), "gms-page-browser-close-"));
+  try {
+    const result = await run({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture",
+      GROK_API_INTERVAL_MIN_SECONDS: "0",
+      GROK_API_INTERVAL_MAX_SECONDS: "0",
+      GMS_TEST_PAGE_IDS: "",
+      GMS_TEST_FINAL_CLOSE_FAILURE: "1",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("浏览器清理失败");
+    const [saved] = await testSql<{ outcome: string; summary: unknown }[]>`
+      SELECT outcome, summary FROM runs WHERE command='save-first-page'`;
+    expect(saved).toEqual({
+      outcome: "succeeded",
+      summary: { saved: 0, failed: 0, unprocessed: 0 },
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("S2 save first-page rejects invalid save config before changing an open Run", async () => {
   await reset();
   const legacyId = crypto.randomUUID();

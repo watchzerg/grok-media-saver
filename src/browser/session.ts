@@ -19,11 +19,14 @@ import {
 const API_TIMEOUT_MS = 30_000;
 const CLEANUP_TIMEOUT_MS = 5_000;
 const LIST_REQUEST_PATTERN = "**/rest/assets?*";
+const PLAYWRIGHT_EXTENSION_ID = "mmlmfjhmonkocbjadbfplnigmagldckm";
 
 export type BrowserSession = {
   getFirstPage(signal: AbortSignal): Promise<PageResponse>;
   getPostDetail(assetId: string, signal: AbortSignal): Promise<PostResponse>;
   downloadMedia: MediaSource;
+  isConnected(): boolean;
+  closePage(): Promise<void>;
   close(): Promise<void>;
   cleanupNotices: string[];
 };
@@ -34,6 +37,7 @@ export async function connectBrowserSession(
   signal: AbortSignal,
 ): Promise<BrowserSession> {
   if (signal.aborted) throw new Error("检查已停止。");
+  const clientName = `Grok Media Saver ${crypto.randomUUID()}`;
   const { browser } = await bundle.tools.createBrowserWithInfo(
     {
       extension: true,
@@ -43,19 +47,9 @@ export async function connectBrowserSession(
         contextOptions: {},
       },
     },
-    { clientName: "Grok Media Saver", cwd: process.cwd() },
+    { clientName, cwd: process.cwd() },
     { browser: "chrome" },
   );
-  if (signal.aborted) {
-    try {
-      await withTimeout(browser.close(), CLEANUP_TIMEOUT_MS);
-    } catch (error) {
-      throw new Error(
-        `检查已停止；浏览器连接清理失败：${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    throw new Error("检查已停止。");
-  }
   let closed = false;
   let disconnected = false;
   browser.on("disconnected", () => {
@@ -74,15 +68,29 @@ export async function connectBrowserSession(
   }
   let page: Awaited<ReturnType<typeof context.newPage>> | undefined;
   let closingPage: Promise<void> | undefined;
-  const cleanupNotices = context
-    .pages()
-    .some((existingPage) =>
-      safePath(existingPage.url()).endsWith("/connect.html"),
-    )
-    ? [
-        "Extension connect.html 的归属无法确认，已保留；请在 Chrome 中人工核对。",
-      ]
-    : [];
+  const cleanupNotices: string[] = [];
+  const connectPages = context.pages().filter((existingPage) => {
+    try {
+      const url = new URL(existingPage.url());
+      if (
+        url.protocol !== "chrome-extension:" ||
+        url.hostname !== PLAYWRIGHT_EXTENSION_ID ||
+        url.pathname !== "/connect.html"
+      )
+        return false;
+      return (
+        JSON.parse(url.searchParams.get("client") ?? "null")?.name ===
+        clientName
+      );
+    } catch {
+      return false;
+    }
+  });
+  const connectPage = connectPages.length === 1 ? connectPages[0] : undefined;
+  if (!connectPage)
+    cleanupNotices.push(
+      "Extension connect.html 的归属无法确认，已保留；请在 Chrome 中人工核对。",
+    );
 
   const closeOwnedPage = () => {
     if (!page || page.isClosed()) return Promise.resolve();
@@ -99,6 +107,13 @@ export async function connectBrowserSession(
     } catch {
       failures.push("应用创建的 Saved 页面未能在 5 秒内关闭");
     }
+    if (connectPage && !connectPage.isClosed()) {
+      try {
+        await withTimeout(connectPage.close(), CLEANUP_TIMEOUT_MS);
+      } catch {
+        failures.push("本次 Extension connect.html 未能在 5 秒内关闭");
+      }
+    }
     try {
       await withTimeout(browser.close(), CLEANUP_TIMEOUT_MS);
     } catch {
@@ -106,11 +121,23 @@ export async function connectBrowserSession(
     }
     if (failures.length) throw new Error(failures.join("；"));
   };
+  if (signal.aborted) {
+    try {
+      await close();
+    } catch (error) {
+      throw new Error(
+        `检查已停止；浏览器连接清理失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    throw new Error("检查已停止。");
+  }
 
   let listRouteInstalled = false;
 
   return {
     cleanupNotices,
+    isConnected: () => !closed && !disconnected,
+    closePage: closeOwnedPage,
     async downloadMedia(selection, onResponse, onChunk, signal) {
       if (closed || disconnected)
         throw new UnconfirmedStopError("Chrome Extension 连接已断开。");

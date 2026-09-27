@@ -9,8 +9,14 @@ import {
 
 mock.module("../../src/browser/session.ts", () => ({
   connectBrowserSession: async (_url: string, requestStarted: () => void) => {
+    const recordBrowser = (kind: string) => {
+      if (process.env.GMS_TEST_BROWSER_EVENTS)
+        appendFileSync(process.env.GMS_TEST_BROWSER_EVENTS, `${kind}\n`);
+    };
+    recordBrowser("connect");
     let attempts = 0;
     let mediaAttempts = 0;
+    let connected = true;
     const recordRequest = (kind: string, postId: string) => {
       requestStarted();
       if (process.env.GMS_TEST_REQUEST_EVENTS)
@@ -160,8 +166,22 @@ mock.module("../../src/browser/session.ts", () => ({
             },
           }
         : {}),
-      close: async () => {
+      isConnected: () => connected,
+      closePage: async () => {
+        recordBrowser("close-page");
+        attempts = 0;
+        mediaAttempts = 0;
+        currentPostId = "";
         if (process.env.GMS_TEST_CLOSE_FAILURE === "1")
+          throw new Error("simulated browser close failure");
+      },
+      close: async () => {
+        recordBrowser("close");
+        connected = false;
+        if (
+          process.env.GMS_TEST_CLOSE_FAILURE === "1" ||
+          process.env.GMS_TEST_FINAL_CLOSE_FAILURE === "1"
+        )
           throw new Error("simulated browser close failure");
       },
       cleanupNotices: [],

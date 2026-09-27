@@ -13,6 +13,8 @@ just gate-full
 
 `gate-core` 覆盖 Bun 版本、TypeScript、基础 Application 测试及 Biome，不启动外部服务。`gate-full` 另运行真实 CLI 子进程和隔离 Docker PostgreSQL 测试；两者都不连接 Chrome、Extension 或 Grok。`just test` 运行 Bun 测试；`just test core` 运行 Application 与能力 seam 测试。
 
+需要浏览器的命令按需建立一次 Playwright Extension 连接；`save first-page` 和非空 `retry` 在整个 Run 内复用连接，各 Post 的工作页用完即关闭。收尾时先关闭工作页，再关闭能用本次随机标记唯一确认的 `connect.html`，最后断开连接。旧运行遗留或归属无法确认的连接页不会自动关闭。
+
 ## 只读检查 Saved 第一页
 
 在已安装 Playwright Extension 且登录 Grok 的主 Chrome 上，准备 `.env` 中的 `PLAYWRIGHT_MCP_EXTENSION_TOKEN`。配置示例见[`.env.example`](.env.example)；环境变量优先于 `.env`，再使用程序默认值。不得将真实 token 提交或写入日志。
