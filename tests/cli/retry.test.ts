@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   initializeProjectDatabase,
   retryUnfinishedPosts,
@@ -152,24 +155,322 @@ test("retry does not compensate after a failed Run completion write", async () =
   }
 });
 
-test("retry with unfinished work fails instead of reporting an empty success", async () => {
+test("retry saves a failed Post through the CLI and records its result", async () => {
   await resetSchema();
-  await testSql`
+  const archiveRoot = await mkdtemp(join(tmpdir(), "gms-retry-"));
+  try {
+    await testSql`
     INSERT INTO post_work (post_id, status, last_error)
     VALUES ('123e4567-e89b-42d3-a456-426614174000', 'failed', 'HTTP 404')
   `;
 
-  const result = await runCli(databaseEnv, ["retry"]);
-  expect(result.exitCode).toBe(1);
-  expect(result.stderr).toContain("尚未实现非空重试");
-  expect(result.stdout).toBe("");
-  const [run] = await testSql<
-    { finished_at: Date | null; outcome: string | null; summary: unknown }[]
-  >`SELECT finished_at, outcome, summary FROM runs`;
-  expect(run?.finished_at).toBeInstanceOf(Date);
-  expect(run?.outcome).toBe("failed");
-  expect(run?.summary).toBeNull();
+    const result = await collectCli(
+      Bun.spawn(
+        [
+          process.execPath,
+          "--no-env-file",
+          "--preload",
+          "./tests/helpers/fake-save-browser.ts",
+          "src/cli.ts",
+          "retry",
+        ],
+        {
+          cwd: process.cwd(),
+          env: {
+            ...databaseEnv,
+            GROK_ARCHIVE_DIR: archiveRoot,
+            PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+            GMS_TEST_MEDIA: "1",
+            GROK_API_INTERVAL_MIN_SECONDS: "0",
+            GROK_API_INTERVAL_MAX_SECONDS: "0",
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        },
+      ),
+    );
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect(result.stdout).toContain("已保存 1");
+    const [run] = await testSql<
+      { finished_at: Date | null; outcome: string | null; summary: unknown }[]
+    >`SELECT finished_at, outcome, summary FROM runs`;
+    expect(run?.finished_at).toBeInstanceOf(Date);
+    expect(run?.outcome).toBe("succeeded");
+    expect(run?.summary).toEqual({ saved: 1, failed: 0, unprocessed: 0 });
+    const [work] = await testSql<
+      { status: string }[]
+    >`SELECT status FROM post_work`;
+    expect(work?.status).toBe("saved");
+  } finally {
+    await rm(archiveRoot, { recursive: true, force: true });
+  }
 });
+
+test("retry fixes its initial set, continues ordinary failure, and saves image and video", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-mixed-"));
+  const ids = [0, 1, 2, 3, 4].map(
+    (n) => `123e4567-e89b-42d3-a456-42661417400${n}`,
+  );
+  const detailLog = join(root, "details.txt");
+  try {
+    for (const [index, status] of [
+      "failed",
+      "pending",
+      "pending",
+      "saved",
+    ].entries())
+      await testSql`INSERT INTO post_work (post_id, status) VALUES (${ids[index]}, ${status})`;
+    await testSql.unsafe(`
+      CREATE FUNCTION add_retry_work() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.status = 'saved' THEN
+          INSERT INTO post_work (post_id, status) VALUES ('${ids[4]}', 'pending') ON CONFLICT DO NOTHING;
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER add_retry_work AFTER UPDATE ON post_work
+      FOR EACH ROW EXECUTE FUNCTION add_retry_work();
+    `);
+    const result = await runFakeRetry({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      GMS_TEST_MEDIA: "1",
+      GMS_TEST_DETAIL_IDS: detailLog,
+      GMS_TEST_UNAVAILABLE_ID: ids[0],
+      GMS_TEST_VIDEO_ID: ids[2],
+    });
+    expect(result.exitCode, result.stderr).toBe(1);
+    expect(result.stderr).toContain("已保存 2，失败 1，未处理 0");
+    expect((await readFile(detailLog, "utf8")).trim().split("\n")).toEqual(
+      ids.slice(0, 3),
+    );
+    const works = await testSql<{ post_id: string; status: string }[]>`
+      SELECT post_id, status FROM post_work ORDER BY post_id`;
+    expect(works.map(({ status }) => status)).toEqual([
+      "failed",
+      "saved",
+      "saved",
+      "saved",
+      "pending",
+    ]);
+    const [run] = await testSql<{ outcome: string; summary: unknown }[]>`
+      SELECT outcome, summary FROM runs WHERE command = 'retry'`;
+    expect(run).toEqual({
+      outcome: "failed",
+      summary: { saved: 2, failed: 1, unprocessed: 0 },
+    });
+    const files = await testSql<
+      { mime_type: string }[]
+    >`SELECT mime_type FROM media_versions ORDER BY post_id`;
+    expect(files.map(({ mime_type }) => mime_type)).toEqual([
+      "image/png",
+      "video/mp4",
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("retry stops after a blocked Post and leaves later work untouched", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-blocked-"));
+  const first = "123e4567-e89b-42d3-a456-426614174000";
+  const second = "123e4567-e89b-42d3-a456-426614174001";
+  try {
+    await testSql`INSERT INTO post_work (post_id,status) VALUES (${first},'failed'),(${second},'pending')`;
+    const result = await runFakeRetry({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      GMS_TEST_BLOCKED_ID: first,
+      GMS_TEST_MEDIA: "1",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("HTTP 429");
+    expect(result.stderr).toContain("未处理 1");
+    const [work] = await testSql<
+      { status: string; last_run_id: string | null }[]
+    >`
+      SELECT status,last_run_id FROM post_work WHERE post_id=${second}`;
+    expect(work).toEqual({ status: "pending", last_run_id: null });
+    const [run] = await testSql<
+      { summary: unknown }[]
+    >`SELECT summary FROM runs WHERE command='retry'`;
+    expect(run?.summary).toEqual({ saved: 0, failed: 1, unprocessed: 1 });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("retry settles a finalizing intent before checking the current detail", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-intent-"));
+  const id = "123e4567-e89b-42d3-a456-426614174000";
+  const bytes = Buffer.from(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489",
+    "hex",
+  );
+  const digest = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+  const relative = `${id}/${digest}.png`;
+  const tempName = ".retry-recover.part";
+  const detailLog = join(root, "details.txt");
+  try {
+    await mkdir(join(root, id));
+    await writeFile(join(root, id, tempName), bytes);
+    await testSql`
+      INSERT INTO post_work (post_id,status,selected_key,quality,mime_type,
+        publish_temp_name,publish_relative_path,publish_expected_bytes,publish_sha256)
+      VALUES (${id},'finalizing','https://assets.grok.com/source.png','image','image/png',
+        ${tempName},${relative},${bytes.length},${digest})`;
+    const result = await runFakeRetry({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      GMS_TEST_MEDIA: "1",
+      GMS_TEST_DETAIL_IDS: detailLog,
+    });
+    expect(result.exitCode, result.stderr).toBe(0);
+    expect((await readFile(detailLog, "utf8")).trim()).toBe(id);
+    expect(await Bun.file(join(root, relative)).bytes()).toEqual(bytes);
+    const [work] = await testSql<
+      { status: string; publish_temp_name: string | null }[]
+    >`
+      SELECT status,publish_temp_name FROM post_work WHERE post_id=${id}`;
+    expect(work).toEqual({ status: "saved", publish_temp_name: null });
+    const [versions] = await testSql<{ count: number }[]>`
+      SELECT count(*)::integer AS count FROM media_versions WHERE post_id=${id}`;
+    expect(versions?.count).toBe(1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("SIGINT during nonempty retry leaves later members unprocessed", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-stop-"));
+  const first = "123e4567-e89b-42d3-a456-426614174000";
+  const second = "123e4567-e89b-42d3-a456-426614174001";
+  try {
+    await testSql`INSERT INTO post_work (post_id,status) VALUES (${first},'pending'),(${second},'failed')`;
+    const result = await runFakeRetry({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      GMS_TEST_ABORT_DETAIL: "1",
+      GMS_TEST_MEDIA: "1",
+    });
+    expect(result.exitCode).toBe(130);
+    const [later] = await testSql<
+      { status: string; last_run_id: string | null }[]
+    >`
+      SELECT status,last_run_id FROM post_work WHERE post_id=${second}`;
+    expect(later).toEqual({ status: "failed", last_run_id: null });
+    const [run] = await testSql<{ outcome: string; summary: unknown }[]>`
+      SELECT outcome,summary FROM runs WHERE command='retry'`;
+    expect(run).toEqual({
+      outcome: "stopped",
+      summary: { saved: 0, failed: 0, unprocessed: 2 },
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("retry leaves its Run open and later work untouched after losing its lock mid-Post", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-lock-loss-"));
+  const first = "123e4567-e89b-42d3-a456-426614174000";
+  const second = "123e4567-e89b-42d3-a456-426614174001";
+  try {
+    await testSql`INSERT INTO post_work (post_id,status) VALUES (${first},'pending'),(${second},'pending')`;
+    await testSql.unsafe(`
+      CREATE FUNCTION drop_lock_after_save() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.post_id = '${first}' AND NEW.status = 'saved' THEN
+          PERFORM pg_advisory_unlock(1297043787, 1);
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER drop_lock_after_save AFTER UPDATE ON post_work
+      FOR EACH ROW EXECUTE FUNCTION drop_lock_after_save();
+    `);
+    const result = await runFakeRetry({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      GMS_TEST_MEDIA: "1",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("执行器会话锁已丢失");
+    const [later] = await testSql<
+      { status: string; last_run_id: string | null }[]
+    >`
+      SELECT status,last_run_id FROM post_work WHERE post_id=${second}`;
+    expect(later).toEqual({ status: "pending", last_run_id: null });
+    const [run] = await testSql<
+      { outcome: string | null; finished_at: Date | null; summary: unknown }[]
+    >`
+      SELECT outcome,finished_at,summary FROM runs WHERE command='retry'`;
+    expect(run).toEqual({ outcome: null, finished_at: null, summary: null });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("retry stops later work when browser cleanup fails after a saved Post", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-cleanup-"));
+  const first = "123e4567-e89b-42d3-a456-426614174000";
+  const second = "123e4567-e89b-42d3-a456-426614174001";
+  try {
+    await testSql`INSERT INTO post_work (post_id,status) VALUES (${first},'pending'),(${second},'pending')`;
+    const result = await runFakeRetry({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      GMS_TEST_MEDIA: "1",
+      GMS_TEST_CLOSE_FAILURE: "1",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("浏览器清理失败");
+    const [firstWork] = await testSql<{ status: string }[]>`
+      SELECT status FROM post_work WHERE post_id=${first}`;
+    expect(firstWork?.status).toBe("saved");
+    const [secondWork] = await testSql<
+      { status: string; last_run_id: string | null }[]
+    >`
+      SELECT status,last_run_id FROM post_work WHERE post_id=${second}`;
+    expect(secondWork).toEqual({ status: "pending", last_run_id: null });
+    const [run] = await testSql<
+      { summary: unknown }[]
+    >`SELECT summary FROM runs WHERE command='retry'`;
+    expect(run?.summary).toEqual({ saved: 1, failed: 0, unprocessed: 1 });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function runFakeRetry(env: Record<string, string>) {
+  return collectCli(
+    Bun.spawn(
+      [
+        process.execPath,
+        "--no-env-file",
+        "--preload",
+        "./tests/helpers/fake-save-browser.ts",
+        "src/cli.ts",
+        "retry",
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...env,
+          PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+          GROK_API_INTERVAL_MIN_SECONDS: "0",
+          GROK_API_INTERVAL_MAX_SECONDS: "0",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    ),
+  );
+}
 
 test("retry stops and leaves the Run unaccounted when its session lock is lost", async () => {
   await resetSchema();
@@ -241,6 +542,20 @@ test("retry validates parameters and configuration before database startup", asy
   expect(missingConfig.exitCode).toBe(2);
   expect(missingConfig.stderr).toContain("GROK_DB_HOST");
   expect(missingConfig.stderr).not.toContain("PLAYWRIGHT_MCP_EXTENSION_TOKEN");
+});
+
+test("nonempty retry rejects missing save configuration before creating a Run", async () => {
+  await resetSchema();
+  await testSql`
+    INSERT INTO post_work (post_id,status)
+    VALUES ('123e4567-e89b-42d3-a456-426614174000','failed')`;
+  const result = await runCli(databaseEnv, ["retry"]);
+  expect(result.exitCode).toBe(2);
+  expect(result.stderr).toContain("GROK_ARCHIVE_DIR");
+  const [run] = await testSql<
+    { id: string }[]
+  >`SELECT id FROM runs WHERE command='retry'`;
+  expect(run).toBeUndefined();
 });
 
 test("retry preserves its completed Run and reports an independent close failure", async () => {

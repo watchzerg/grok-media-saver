@@ -114,11 +114,13 @@ export async function main(
         config,
         undefined,
         controller.signal,
+        () => readSaveConfig(env),
       );
       if (result.status === "ok") console.log(result.message);
       else console.error(result.message);
       for (const error of result.cleanupErrors) console.error(error);
       if (result.status === "cancelled") return 130;
+      if (result.status === "invalid") return 2;
       return result.status === "ok" ? 0 : 1;
     } finally {
       process.off("SIGINT", stop);

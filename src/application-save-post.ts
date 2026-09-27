@@ -56,7 +56,7 @@ export type SavePostResult = {
   cleanupErrors: string[];
 };
 
-function safeSaveError(error: unknown, config: SaveConfig): string {
+export function safeSaveError(error: unknown, config: SaveConfig): string {
   let message = safeDatabaseError(error, config);
   for (const secret of [
     config.extensionToken,
@@ -67,6 +67,101 @@ function safeSaveError(error: unknown, config: SaveConfig): string {
   return message.replace(/([?&](?:token|auth|key)=)[^&\s]+/gi, "$1[已隐藏]");
 }
 
+export async function archivePostInRun(
+  config: SaveConfig,
+  postId: string,
+  runId: string,
+  session: ReservedSQL,
+  options: SavePostOptions,
+  write: <T>(operation: () => Promise<T>) => Promise<T>,
+  onSaved: () => void,
+  onCleanupError: (message: string) => void,
+): Promise<SavePostResult> {
+  const signal = options.signal ?? new AbortController().signal;
+  let browser: SavePostSession | undefined;
+  let postResult: SavePostResult | undefined;
+  let saved = false;
+  const recordSaved = () => {
+    saved = true;
+    onSaved();
+  };
+  try {
+    const archived = await archivePost({
+      postId,
+      archiveRoot: config.archiveRoot,
+      signal,
+      onStage: options.onStage,
+      store: {
+        readWork: async (id) => {
+          const work = await readWork(session, id);
+          if (work?.status === "saved") recordSaved();
+          return work;
+        },
+        startWork: (id, run) => write(() => startWork(session, id, run)),
+        clearMissingIntent: (id, work, run) =>
+          write(() => clearMissingIntent(session, id, work, run)),
+        settleIntent: async (id, work, run) => {
+          await write(() => settleIntent(session, id, work, run));
+          recordSaved();
+        },
+        failUnreadableDetail: (id, run) =>
+          write(() => failUnreadableDetail(session, id, run)),
+        readSavedVersion: (id, version) =>
+          readSavedVersion(session, id, version),
+        recordReusedVersion: (id, run, version) =>
+          write(() => recordReusedVersion(session, id, run, version)),
+        markFileNotReusable: (id, run) =>
+          write(() => markFileNotReusable(session, id, run)),
+        markNeedsDownload: (id, run, selection) =>
+          write(() => markNeedsDownload(session, id, run, selection)),
+        recordPublishIntent: (id, run, selection, intent) =>
+          write(() => recordPublishIntent(session, id, run, selection, intent)),
+        failDownload: (id, run, reason) =>
+          write(() => failDownload(session, id, run, reason)),
+        assertLock: () => assertExecutorLock(session),
+      },
+      getDetail: async (detailSignal) => {
+        browser ??= await options.connect(detailSignal);
+        return browser.getPostDetail(postId, detailSignal);
+      },
+      waitBeforeRetry: options.waitBeforeRetry,
+      downloadMedia: async (selection, onResponse, onChunk, transferSignal) => {
+        if (!browser?.downloadMedia)
+          throw new MediaCapabilityUnavailableError(
+            "浏览器会话不支持媒体流传输。",
+          );
+        await browser.downloadMedia(
+          selection,
+          onResponse,
+          onChunk,
+          transferSignal,
+        );
+      },
+      hasMediaCapability: () => Boolean(browser?.downloadMedia),
+      mediaTimeouts: {
+        firstByte: config.mediaFirstByteTimeoutSeconds * 1000,
+        noProgress: config.mediaNoProgressTimeoutSeconds * 1000,
+        total: config.mediaTotalTimeoutSeconds * 1000,
+      },
+      runId,
+    });
+    postResult = { ...archived, saveRecorded: saved };
+    return postResult;
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch (error) {
+        const message = `浏览器清理失败：${safeSaveError(error, config)}`;
+        if (postResult) postResult.cleanupErrors.push(message);
+        else onCleanupError(message);
+      }
+      if (postResult && browser.cleanupNotices?.length)
+        postResult.message = `${postResult.message} ${browser.cleanupNotices.join(" ")}`;
+    }
+  }
+}
+
 export async function savePost(
   config: SaveConfig,
   postId: string,
@@ -75,7 +170,6 @@ export async function savePost(
   const signal = options.signal ?? new AbortController().signal;
   let sql: ReturnType<typeof connectDatabase> | undefined;
   let session: ReservedSQL | undefined;
-  let browser: SavePostSession | undefined;
   let lockAcquired = false;
   let runId: string | undefined;
   let runWriteUnknown = false;
@@ -120,68 +214,18 @@ export async function savePost(
     runWriteUnknown = false;
     await assertExecutorLock(session);
     if (signal.aborted) throw new Error("保存已停止。");
-    const activeSession = session;
-    const postResult = await archivePost({
+    const postResult = await archivePostInRun(
+      config,
       postId,
-      archiveRoot: config.archiveRoot,
-      signal,
-      onStage: options.onStage,
-      store: {
-        readWork: async (id) => {
-          const work = await readWork(activeSession, id);
-          if (work?.status === "saved") result.saveRecorded = true;
-          return work;
-        },
-        startWork: (id, run) => write(() => startWork(activeSession, id, run)),
-        clearMissingIntent: (id, work, run) =>
-          write(() => clearMissingIntent(activeSession, id, work, run)),
-        settleIntent: async (id, work, run) => {
-          await write(() => settleIntent(activeSession, id, work, run));
-          result.saveRecorded = true;
-        },
-        failUnreadableDetail: (id, run) =>
-          write(() => failUnreadableDetail(activeSession, id, run)),
-        readSavedVersion: (id, version) =>
-          readSavedVersion(activeSession, id, version),
-        recordReusedVersion: (id, run, version) =>
-          write(() => recordReusedVersion(activeSession, id, run, version)),
-        markFileNotReusable: (id, run) =>
-          write(() => markFileNotReusable(activeSession, id, run)),
-        markNeedsDownload: (id, run, selection) =>
-          write(() => markNeedsDownload(activeSession, id, run, selection)),
-        recordPublishIntent: (id, run, selection, intent) =>
-          write(() =>
-            recordPublishIntent(activeSession, id, run, selection, intent),
-          ),
-        failDownload: (id, run, reason) =>
-          write(() => failDownload(activeSession, id, run, reason)),
-        assertLock: () => assertExecutorLock(activeSession),
-      },
-      getDetail: async (detailSignal) => {
-        browser ??= await options.connect(detailSignal);
-        return browser.getPostDetail(postId, detailSignal);
-      },
-      waitBeforeRetry: options.waitBeforeRetry,
-      downloadMedia: async (selection, onResponse, onChunk, transferSignal) => {
-        if (!browser?.downloadMedia)
-          throw new MediaCapabilityUnavailableError(
-            "浏览器会话不支持媒体流传输。",
-          );
-        await browser.downloadMedia(
-          selection,
-          onResponse,
-          onChunk,
-          transferSignal,
-        );
-      },
-      hasMediaCapability: () => Boolean(browser?.downloadMedia),
-      mediaTimeouts: {
-        firstByte: config.mediaFirstByteTimeoutSeconds * 1000,
-        noProgress: config.mediaNoProgressTimeoutSeconds * 1000,
-        total: config.mediaTotalTimeoutSeconds * 1000,
-      },
       runId,
-    });
+      session,
+      options,
+      write,
+      () => {
+        result.saveRecorded = true;
+      },
+      (message) => result.cleanupErrors.push(message),
+    );
     Object.assign(result, postResult);
     if (runId) {
       options.onStage?.("核对收尾执行器锁");
@@ -212,17 +256,6 @@ export async function savePost(
       }
     }
   } finally {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch (error) {
-        result.cleanupErrors.push(
-          `浏览器清理失败：${safeSaveError(error, config)}`,
-        );
-      }
-      if (browser.cleanupNotices?.length)
-        result.message = `${result.message} ${browser.cleanupNotices.join(" ")}`;
-    }
     if (session) {
       if (lockAcquired) {
         try {

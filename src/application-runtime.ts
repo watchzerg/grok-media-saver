@@ -1,6 +1,11 @@
 import type { SQL } from "bun";
 import { inspectFirstPage, inspectPost } from "./application";
-import { type SavePostOptions, savePost } from "./application-save-post";
+import {
+  archivePostInRun,
+  type SavePostOptions,
+  safeSaveError,
+  savePost,
+} from "./application-save-post";
 import { connectBrowserSession } from "./browser/session";
 import type {
   DatabaseConfig,
@@ -16,6 +21,7 @@ import {
   releaseExecutorLock,
   tryAcquireExecutorLock,
 } from "./store/executor";
+import { KnownSaveFailure } from "./store/save-work";
 import { initializeSchema, verifySchema } from "./store/schema";
 
 export type DatabaseResult = {
@@ -42,7 +48,7 @@ export type VerifyResult = {
 };
 
 export type RetryResult = Omit<DatabaseResult, "status"> & {
-  status: "ok" | "failed" | "cancelled";
+  status: "ok" | "failed" | "cancelled" | "invalid";
 };
 
 export type DatabaseCloser = (
@@ -92,6 +98,8 @@ export async function retryUnfinishedPosts(
   config: DatabaseConfig,
   close: DatabaseCloser = closeDatabase,
   signal?: AbortSignal,
+  prepareSave?: () => SaveConfig,
+  connect?: SavePostOptions["connect"],
 ): Promise<RetryResult> {
   let sql: ReturnType<typeof connectDatabase> | undefined;
   let session:
@@ -102,6 +110,8 @@ export async function retryUnfinishedPosts(
   let runCreated = false;
   let runTerminalWriteAcknowledged = false;
   let runWriteUnknown = false;
+  let invalidConfig = false;
+  const counts = { saved: 0, failed: 0, unprocessed: 0 };
   let result: RetryResult = {
     status: "failed",
     message: "重试执行失败。",
@@ -173,6 +183,23 @@ export async function retryUnfinishedPosts(
             cleanupErrors: [],
           };
         } else {
+          const targets = await session<{ postId: string }[]>`
+            SELECT post_id AS "postId" FROM post_work
+            WHERE status IN ('pending', 'finalizing', 'failed')
+            ORDER BY post_id
+          `;
+          counts.unprocessed = targets.length;
+          await assertExecutorLock(session);
+          let saveConfig: SaveConfig | undefined;
+          if (targets.length) {
+            try {
+              saveConfig = prepareSave?.();
+              if (!saveConfig) throw new Error("非空重试缺少保存配置。");
+            } catch (error) {
+              invalidConfig = true;
+              throw error;
+            }
+          }
           runId = crypto.randomUUID();
           runWriteUnknown = true;
           const inserted = await session<{ id: string }[]>`
@@ -206,10 +233,6 @@ export async function retryUnfinishedPosts(
                   cleanupErrors: [],
                 };
           } else {
-            const [pending] = await session<{ count: number }[]>`
-              SELECT count(*)::integer AS count FROM post_work WHERE status <> 'saved'
-            `;
-            await assertExecutorLock(session);
             if (signal?.aborted) {
               const stopped = await finishStoppedRun(
                 session,
@@ -230,31 +253,87 @@ export async function retryUnfinishedPosts(
                     message: "重试已停止；Run 未记录停止结果。",
                     cleanupErrors: [],
                   };
-            } else if ((pending?.count ?? 0) > 0) {
-              result.message = `重试失败：当前有 ${pending?.count ?? 0} 个未完成 Post，尚未实现非空重试。`;
-              runWriteUnknown = true;
-              const updated = await session<{ id: string }[]>`
-                UPDATE runs
-                SET finished_at = now(), outcome = 'failed'
-                WHERE id = ${runId}::uuid
-                RETURNING id::text AS id
-              `;
-              runWriteUnknown = false;
-              runTerminalWriteAcknowledged = true;
-              if (updated.length !== 1) throw new Error("Run 失败结果未记录。");
-              await assertExecutorLock(session);
             } else {
+              let stopReason = "";
+              if (targets.length) {
+                if (!saveConfig) throw new Error("非空重试缺少保存配置。");
+                const scheduler = createRequestScheduler({
+                  minSeconds: saveConfig.requestIntervalMinSeconds,
+                  maxSeconds: saveConfig.requestIntervalMaxSeconds,
+                });
+                for (const target of targets) {
+                  if (signal?.aborted) break;
+                  await assertExecutorLock(session);
+                  let browserResult: Awaited<
+                    ReturnType<typeof archivePostInRun>
+                  >;
+                  try {
+                    browserResult = await archivePostInRun(
+                      saveConfig,
+                      target.postId,
+                      runId,
+                      session,
+                      {
+                        signal,
+                        waitBeforeRetry: scheduler.beforeRequest,
+                        connect:
+                          connect ??
+                          ((connectSignal) =>
+                            connectBrowserSession(
+                              saveConfig.savedPageUrl,
+                              scheduler.requestStarted,
+                              connectSignal,
+                            )),
+                      },
+                      async (operation) => {
+                        runWriteUnknown = true;
+                        try {
+                          const value = await operation();
+                          runWriteUnknown = false;
+                          return value;
+                        } catch (error) {
+                          if (error instanceof KnownSaveFailure)
+                            runWriteUnknown = false;
+                          throw error;
+                        }
+                      },
+                      () => undefined,
+                      (message) => result.cleanupErrors.push(message),
+                    );
+                  } catch (error) {
+                    if (runWriteUnknown) throw error;
+                    stopReason = safeSaveError(error, saveConfig);
+                    break;
+                  }
+                  counts.unprocessed -= 1;
+                  if (browserResult.status === "ok") counts.saved += 1;
+                  else counts.failed += 1;
+                  if (browserResult.cleanupErrors.length) {
+                    result.cleanupErrors.push(...browserResult.cleanupErrors);
+                    stopReason = browserResult.cleanupErrors.join(" ");
+                    break;
+                  }
+                  if (
+                    browserResult.status === "blocked" ||
+                    browserResult.status === "cancelled"
+                  ) {
+                    stopReason = browserResult.message;
+                    break;
+                  }
+                }
+              }
+              await assertExecutorLock(session);
               runWriteUnknown = true;
               const updated = await session<{ id: string }[]>`
-                UPDATE runs
-                SET finished_at = now(), outcome = 'succeeded',
-                  summary = '{"saved":0,"failed":0,"unprocessed":0}'::jsonb
+                UPDATE runs SET finished_at = now(),
+                  outcome = ${signal?.aborted ? "stopped" : counts.failed || counts.unprocessed || stopReason ? "failed" : "succeeded"},
+                  summary = ${counts}::jsonb
                 WHERE id = ${runId}::uuid
                 RETURNING id::text AS id
               `;
               runWriteUnknown = false;
               runTerminalWriteAcknowledged = true;
-              if (updated.length !== 1) throw new Error("Run 成功结果未记录。");
+              if (updated.length !== 1) throw new Error("Run 结果未记录。");
               await assertExecutorLock(session);
               result = signal?.aborted
                 ? {
@@ -263,9 +342,12 @@ export async function retryUnfinishedPosts(
                     cleanupErrors: [],
                   }
                 : {
-                    status: "ok",
-                    message: "没有未完成 Post，重试 Run 已正常结束。",
-                    cleanupErrors: [],
+                    status:
+                      counts.failed || counts.unprocessed || stopReason
+                        ? "failed"
+                        : "ok",
+                    message: `${targets.length ? "重试结束" : "没有未完成 Post，重试 Run 已正常结束"}：已保存 ${counts.saved}，失败 ${counts.failed}，未处理 ${counts.unprocessed}。${stopReason ? ` ${stopReason}` : ""}`,
+                    cleanupErrors: result.cleanupErrors,
                   };
             }
           }
@@ -273,7 +355,10 @@ export async function retryUnfinishedPosts(
       }
     }
   } catch (error) {
-    if (signal?.aborted) {
+    if (invalidConfig && !signal?.aborted) {
+      result.status = "invalid";
+      result.message = `配置无效：${safeDatabaseError(error, config)}`;
+    } else if (signal?.aborted) {
       result = {
         status: "cancelled",
         message: "重试已停止。",

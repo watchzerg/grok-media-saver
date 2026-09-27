@@ -9,6 +9,8 @@ mock.module("../../src/browser/session.ts", () => ({
       getPostDetail: async (postId: string) => {
         requestStarted();
         attempts += 1;
+        if (process.env.GMS_TEST_DETAIL_IDS)
+          appendFileSync(process.env.GMS_TEST_DETAIL_IDS, `${postId}\n`);
         if (process.env.GMS_TEST_REQUEST_TIMES)
           appendFileSync(process.env.GMS_TEST_REQUEST_TIMES, `${Date.now()}\n`);
         if (process.env.GMS_TEST_ABORT_DETAIL === "1") {
@@ -17,24 +19,34 @@ mock.module("../../src/browser/session.ts", () => ({
         }
         return parsePostDetailResponse(postId, {
           status:
-            process.env.GMS_TEST_BLOCKED === "1"
+            process.env.GMS_TEST_BLOCKED === "1" ||
+            process.env.GMS_TEST_BLOCKED_ID === postId
               ? 429
-              : process.env.GMS_TEST_UNAVAILABLE === "1"
+              : process.env.GMS_TEST_UNAVAILABLE === "1" ||
+                  process.env.GMS_TEST_UNAVAILABLE_ID === postId
                 ? 404
                 : process.env.GMS_TEST_RETRY_DETAIL === "1" && attempts === 1
                   ? 503
                   : 200,
           contentType: "application/json",
           finalPath: "/rest/app-chat/conversations/fixture",
-          retryAfter: process.env.GMS_TEST_BLOCKED === "1" ? "60" : undefined,
+          retryAfter:
+            process.env.GMS_TEST_BLOCKED === "1" ||
+            process.env.GMS_TEST_BLOCKED_ID === postId
+              ? "60"
+              : undefined,
           body: {
             assetId: postId,
             key:
-              process.env.GMS_TEST_VIDEO === "1"
+              process.env.GMS_TEST_VIDEO === "1" ||
+              process.env.GMS_TEST_VIDEO_ID === postId
                 ? "https://videos.grok.com/source.mp4"
                 : "https://assets.grok.com/source.png",
             mimeType:
-              process.env.GMS_TEST_VIDEO === "1" ? "video/mp4" : "image/png",
+              process.env.GMS_TEST_VIDEO === "1" ||
+              process.env.GMS_TEST_VIDEO_ID === postId
+                ? "video/mp4"
+                : "image/png",
           },
         });
       },
@@ -45,18 +57,18 @@ mock.module("../../src/browser/session.ts", () => ({
               onResponse: (headers: unknown) => Promise<void>,
               onChunk: (chunk: Uint8Array) => Promise<void>,
             ) => {
+              const video = String(
+                (_selection as { key?: string }).key ?? "",
+              ).includes(".mp4");
               const image = Buffer.from(
-                process.env.GMS_TEST_VIDEO === "1"
+                video
                   ? "000000186674797069736f6d0000000069736f6d"
                   : "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489",
                 "hex",
               );
               await onResponse({
                 status: 200,
-                contentType:
-                  process.env.GMS_TEST_VIDEO === "1"
-                    ? "video/mp4"
-                    : "image/png",
+                contentType: video ? "video/mp4" : "image/png",
                 contentLength: String(image.length),
                 contentEncoding: null,
               });
@@ -68,7 +80,10 @@ mock.module("../../src/browser/session.ts", () => ({
             },
           }
         : {}),
-      close: async () => {},
+      close: async () => {
+        if (process.env.GMS_TEST_CLOSE_FAILURE === "1")
+          throw new Error("simulated browser close failure");
+      },
       cleanupNotices: [],
     };
   },
