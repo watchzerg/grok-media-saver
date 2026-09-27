@@ -95,9 +95,20 @@ export async function checkArchiveFile(
   try {
     await file.close();
   } catch {
-    return result.status === "failed"
-      ? { status: "failed", reason: `${result.reason} 文件关闭失败。` }
-      : { status: "failed", reason: "文件关闭失败。" };
+    const primaryReason =
+      result.status === "failed"
+        ? result.reason
+        : result.status === "mismatch"
+          ? "文件大小或 SHA-256 与保存记录不符。"
+          : result.status === "directory"
+            ? "保存路径不是普通文件。"
+            : null;
+    return {
+      status: "failed",
+      reason: primaryReason
+        ? `${primaryReason} 文件关闭失败。`
+        : "文件关闭失败。",
+    };
   }
   return result;
 }

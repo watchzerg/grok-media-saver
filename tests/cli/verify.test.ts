@@ -185,6 +185,7 @@ test("verify reports an archive file close failure", async () => {
       postId,
     );
     expect(result.status).toBe("failed");
+    expect(result.message).toContain("大小或 SHA-256");
     expect(result.message).toContain("文件关闭失败");
     expect(result.cleanupErrors).toEqual([]);
     expect(await readPersistedFacts()).toEqual(before);
