@@ -6,10 +6,10 @@
 
 | 目录 | 职责 | 当前入口 |
 | --- | --- | --- |
-| `agents/` | agent 工作流与详细规则 | [Beads](agents/issue-tracker.md)、[triage labels](agents/triage-labels.md)、[领域文档规则](agents/domain.md) |
+| `agents/` | agent 工作流与详细规则 | [Beads](agents/issue-tracker.md)、[triage labels](agents/triage-labels.md)、[领域文档规则](agents/domain.md)、[测试设计与验收](agents/testing.md) |
 | `specs/` | 已确认、需要在仓库中维护的产品或配置契约 | [产品目标与首版范围](specs/product-goals.md)、[一期可靠保存规格](specs/phase1-saving.md) |
 | `research/` | 带版本和观察时点的调研、实验与证据 | [一期验收记录](research/phase1-acceptance.md)、[归档核心模型与 HTTP 参考](research/core-archive-model-and-http.md)、[Playwright Extension 媒体下载验证](research/2026-09-25-grok-playwright-extension-demo.md) |
-| `development/` | 实现路线、开发、构建、测试与依赖维护说明 | [一期开发者运行与恢复](development/phase1-runbook.md)、[实现路线图](development/implementation-roadmap.md) |
+| `development/` | 实现路线、开发、构建、测试与依赖维护说明 | [一期开发者运行与恢复](development/phase1-runbook.md)、[实现路线图](development/implementation-roadmap.md)、[技术选型与依赖管理](development/technology-stack.md) |
 
 按需新增以下分类，不预建空目录：
 
@@ -35,11 +35,14 @@
 - 本仓库的 issue、spec、执行计划与验收记录以 Beads 为入口，操作规则见 [Beads 约定](agents/issue-tracker.md)。[产品目标与首版范围](specs/product-goals.md)是已确认目标的权威正文；后续具体规格与计划引用该文档，不重复维护目标正文。
 - `CONTEXT.md` 定义领域词汇，[ARCHITECTURE.md](../ARCHITECTURE.md)定义已接受的模块职责与架构决定，ADR 记录重要决策及其理由。现有内容与后续变更冲突时，先明确冲突并更新权威来源。
 - [一期可靠保存规格](specs/phase1-saving.md)维护一期行为、持久事实、恢复及 Testing Decisions；Beads 决策票保留过程与确认记录，后续实现票引用规格。
+- [技术选型与依赖管理](development/technology-stack.md)维护工具和依赖政策；当前版本以配置与 lockfile 为准。根 [justfile](../justfile)及其调用代码定义实际命令行为。
+- [测试设计与验收](agents/testing.md)维护按改动选择验证的规则及共享流程入口；具体规格维护行为覆盖、approved seams 和现场验收要求。
 - `research/` 记录观察和证据；研究建议本身不构成产品合同。
 - [README.md](../README.md) 是使用入口；安装、配置和运行步骤应以实际可执行的项目状态为准。
 
 ## 维护规则
 
+- `ARCHITECTURE.md` 是每项任务的必读入口，保持正文精炼，聚焦整体结构、模块职责和关键约束；详细行为、决策背景与操作步骤放在对应规格、ADR 或指南中，通过明确的按需链接展开。
 - 按文档用途归类；具体主题文件使用小写连字符命名，目录索引统一使用 `INDEX.md`，ADR 使用编号加小写主题命名。
 - 新增、移动或删除文档时，同步更新本索引与受影响的引用；仅在有内容时新增目录。
 - 每项契约只维护一份权威正文，其余位置使用链接或明确的 Beads 引用。
