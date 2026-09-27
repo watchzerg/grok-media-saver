@@ -58,6 +58,7 @@ mise exec -- bun src/cli.ts save post <Post-ID>
 ```
 
 此命令需要数据库、归档目录和 Playwright Extension 配置；只作用于当前 schema 与新启动的 Run。首次 Ctrl+C 停止新请求，已开始的文件发布及短事务先完成必要收尾；再次运行同一命令会重新核对数据库与文件事实。
+若停止发生在 Run 成功收尾事务开始后，命令仍以 `130` 报告停止，已提交的 `succeeded` Run 与已保存 Post 保持原样。
 
 ## 核验指定 Post 的本地文件
 

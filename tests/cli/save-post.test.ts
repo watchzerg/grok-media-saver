@@ -661,6 +661,114 @@ test("real CLI SIGINT while checking a saved file exits stopped", async () => {
   expect(work?.status).toBe("saved");
 });
 
+test.each([
+  ["核对收尾执行器锁", "stopped"],
+  ["收尾 Run", "stopped"],
+  ["Run 已收尾", "succeeded"],
+] as const)(
+  "stop at %s reports cancellation while preserving the committed Run fact",
+  async (stopAt, outcome) => {
+    const config = await seed();
+    await writeFile(join(config.archiveRoot, relativePath), bytes);
+    const controller = new AbortController();
+    const result = await saveViaApplication(config, postId, {
+      ...matchingDetail(),
+      signal: controller.signal,
+      onStage: (stage) => {
+        if (stage === stopAt) {
+          if (stage === "核对收尾执行器锁")
+            queueMicrotask(() => controller.abort());
+          else controller.abort();
+        }
+      },
+    });
+    expect(result.status).toBe("cancelled");
+    expect(result.saveRecorded).toBe(true);
+    const [run] = await testSql<{ outcome: string }[]>`
+      SELECT outcome FROM runs ORDER BY started_at DESC LIMIT 1
+    `;
+    expect(run?.outcome).toBe(outcome);
+    const [work] = await testSql<{ status: string }[]>`
+      SELECT status FROM post_work WHERE post_id = ${postId}
+    `;
+    expect(work?.status).toBe("saved");
+  },
+);
+
+test("real CLI SIGINT during Run finish exits 130 without rewriting its success", async () => {
+  const config = await seed();
+  await writeFile(join(config.archiveRoot, relativePath), bytes);
+  await testSql.unsafe(`
+    CREATE FUNCTION delay_run_finish() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW.finished_at IS NOT NULL THEN PERFORM pg_sleep(1); END IF;
+      RETURN NEW;
+    END $$
+  `);
+  await testSql.unsafe(`
+    CREATE TRIGGER delay_run_finish BEFORE UPDATE ON runs
+    FOR EACH ROW EXECUTE FUNCTION delay_run_finish()
+  `);
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--no-env-file",
+      "--preload",
+      "./tests/helpers/fake-save-browser.ts",
+      "src/cli.ts",
+      "save",
+      "post",
+      postId,
+    ],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...databaseEnv,
+        GROK_ARCHIVE_DIR: config.archiveRoot,
+        PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  try {
+    const deadline = Date.now() + 5_000;
+    let sleeping = false;
+    while (Date.now() < deadline) {
+      const [activity] = await testSql<{ sleeping: boolean }[]>`
+        SELECT EXISTS (
+          SELECT 1 FROM pg_stat_activity
+          WHERE datname = current_database() AND pid <> pg_backend_pid()
+            AND state = 'active' AND wait_event = 'PgSleep'
+        ) AS sleeping
+      `;
+      if (activity?.sleeping) {
+        sleeping = true;
+        break;
+      }
+      await Bun.sleep(20);
+    }
+    expect(sleeping).toBe(true);
+    child.kill("SIGINT");
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(exitCode, `${stdout}\n${stderr}`).toBe(130);
+    const [run] = await testSql<{ outcome: string }[]>`
+      SELECT outcome FROM runs ORDER BY started_at DESC LIMIT 1
+    `;
+    expect(run?.outcome).toBe("succeeded");
+    expect(stdout + stderr).toContain("停止");
+  } finally {
+    child.kill();
+    await child.exited;
+    await testSql.unsafe("DROP TRIGGER delay_run_finish ON runs");
+    await testSql.unsafe("DROP FUNCTION delay_run_finish()");
+  }
+});
+
 test.each(["正式文件已发布", "提交保存结果", "保存结果已提交"])(
   "stop at %s preserves a resumable or saved fact",
   async (stopAt) => {

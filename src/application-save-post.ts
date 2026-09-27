@@ -77,6 +77,12 @@ export async function savePost(
     saveRecorded: false,
     cleanupErrors: [],
   };
+  const reportStopAfterSave = () => {
+    if (signal.aborted && result.status === "ok") {
+      result.status = "cancelled";
+      result.message = "保存已停止；Post 已保存。";
+    }
+  };
   const write = async <T>(operation: () => Promise<T>): Promise<T> => {
     runWriteUnknown = true;
     try {
@@ -142,10 +148,14 @@ export async function savePost(
     });
     Object.assign(result, postResult);
     if (runId) {
+      options.onStage?.("核对收尾执行器锁");
       await assertExecutorLock(session);
+      options.onStage?.("收尾 Run");
+      reportStopAfterSave();
       runWriteUnknown = true;
       await finishSaveRun(session, runId, result.status);
       runWriteUnknown = false;
+      options.onStage?.("Run 已收尾");
     }
   } catch (error) {
     if (error instanceof KnownSaveFailure) runWriteUnknown = false;
@@ -204,6 +214,7 @@ export async function savePost(
         );
       }
     }
+    reportStopAfterSave();
     if (result.cleanupErrors.length && result.status === "ok") {
       result.status = "failed";
       result.message = "Post 已保存，但资源清理失败。";
