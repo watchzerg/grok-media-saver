@@ -4,6 +4,7 @@ import {
   inspectSavedPost,
   readProjectStatus,
   retryUnfinishedPosts,
+  saveFirstPage,
   saveSelectedPost,
   verifySavedPost,
 } from "./application-runtime";
@@ -18,7 +19,7 @@ import {
 import { normalizePostId } from "./grok/adapter";
 
 const usage =
-  "用法：grok-media-saver db init | status | retry | verify <Post ID> | inspect first-page | inspect post <Post ID> | save post <Post ID>";
+  "用法：grok-media-saver db init | status | retry | verify <Post ID> | inspect first-page | inspect post <Post ID> | save first-page | save post <Post ID>";
 
 type CliDependencies = {
   initializeProjectDatabase: typeof initializeProjectDatabase;
@@ -35,6 +36,8 @@ export async function main(
     args.length === 2 && args[0] === "db" && args[1] === "init";
   const isStatus = args.length === 1 && args[0] === "status";
   const isRetry = args.length === 1 && args[0] === "retry";
+  const isSaveFirstPage =
+    args.length === 2 && args[0] === "save" && args[1] === "first-page";
   const isVerify = args.length === 2 && args[0] === "verify";
   const isPost =
     args.length === 3 && args[0] === "inspect" && args[1] === "post";
@@ -90,7 +93,7 @@ export async function main(
     for (const error of result.cleanupErrors) console.error(error);
     return result.status === "ok" ? 0 : 1;
   }
-  if (isRetry) {
+  if (isRetry || isSaveFirstPage) {
     let config: DatabaseConfig;
     try {
       config = readDatabaseConfig(env);
@@ -110,7 +113,7 @@ export async function main(
     };
     process.on("SIGINT", stop);
     try {
-      const result = await retryUnfinishedPosts(
+      const result = await (isRetry ? retryUnfinishedPosts : saveFirstPage)(
         config,
         undefined,
         controller.signal,

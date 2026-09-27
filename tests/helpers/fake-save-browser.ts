@@ -3,6 +3,7 @@ import { appendFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   parsePostDetailResponse,
+  parseSavedPageResponse,
   RetryableRequestError,
 } from "../../src/grok/adapter";
 
@@ -20,6 +21,30 @@ mock.module("../../src/browser/session.ts", () => ({
     };
     let currentPostId = "";
     return {
+      getFirstPage: async () => {
+        recordRequest("page", "");
+        const ids = (process.env.GMS_TEST_PAGE_IDS ?? "")
+          .split(",")
+          .filter(Boolean);
+        return parseSavedPageResponse({
+          status:
+            process.env.GMS_TEST_PAGE_BLOCKED === "1"
+              ? 429
+              : Number(process.env.GMS_TEST_PAGE_STATUS ?? 200),
+          contentType: "application/json",
+          finalPath: "/rest/app-chat/saved",
+          body: {
+            assets: ids.map((assetId) => ({
+              assetId,
+              mimeType:
+                process.env.GMS_TEST_VIDEO_ID === assetId
+                  ? "video/mp4"
+                  : "image/png",
+            })),
+            nextPageToken: "next-page-must-not-be-read",
+          },
+        });
+      },
       getPostDetail: async (postId: string) => {
         currentPostId = postId;
         recordRequest("detail", postId);
