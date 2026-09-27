@@ -332,7 +332,12 @@ export async function retryUnfinishedPosts(
                   }
                   counts.unprocessed -= 1;
                   if (browserResult.status === "ok") counts.saved += 1;
-                  else counts.failed += 1;
+                  else {
+                    counts.failed += 1;
+                    postErrors.push(
+                      `Post ${target.postId}：${safeSaveError(browserResult.message, saveConfig)}`,
+                    );
+                  }
                   if (browserResult.cleanupErrors.length) {
                     result.cleanupErrors.push(...browserResult.cleanupErrors);
                     stopReason = browserResult.cleanupErrors.join(" ");
@@ -342,7 +347,6 @@ export async function retryUnfinishedPosts(
                     browserResult.status === "blocked" ||
                     browserResult.status === "cancelled"
                   ) {
-                    stopReason = browserResult.message;
                     break;
                   }
                 }

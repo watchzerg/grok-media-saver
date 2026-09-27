@@ -48,7 +48,7 @@ mock.module("../../src/browser/session.ts", () => ({
           retryAfter:
             process.env.GMS_TEST_BLOCKED === "1" ||
             process.env.GMS_TEST_BLOCKED_ID === postId
-              ? "60"
+              ? (process.env.GMS_TEST_RETRY_AFTER ?? "60")
               : undefined,
           body: {
             assetId: postId,

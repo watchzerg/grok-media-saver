@@ -431,11 +431,13 @@ test("SIGINT after a nonempty retry snapshot records known unprocessed counts", 
 });
 
 test.each([
-  { response: "unavailable", blocked: false },
-  { response: "blocked", blocked: true },
+  { response: "unavailable", blocked: false, closeFailure: false },
+  { response: "unavailable", blocked: false, closeFailure: true },
+  { response: "blocked", blocked: true, closeFailure: false },
+  { response: "blocked", blocked: true, closeFailure: true },
 ])(
-  "retry counts a returned $response result before browser cleanup stops it",
-  async ({ blocked }) => {
+  "retry 保留返回式 $response 的原因与计数（cleanup=$closeFailure）",
+  async ({ blocked, closeFailure }) => {
     await resetSchema();
     const root = await mkdtemp(join(tmpdir(), "gms-retry-return-cleanup-"));
     const first = "123e4567-e89b-42d3-a456-426614174000";
@@ -446,18 +448,38 @@ test.each([
         ...databaseEnv,
         GROK_ARCHIVE_DIR: root,
         GMS_TEST_MEDIA: "1",
-        GMS_TEST_CLOSE_FAILURE: "1",
+        ...(closeFailure ? { GMS_TEST_CLOSE_FAILURE: "1" } : {}),
+        GMS_TEST_RETRY_AFTER: `60 fixture-token ${databaseEnv.GROK_DB_PASSWORD} https://example.invalid/?token=private-query`,
         [blocked ? "GMS_TEST_BLOCKED_ID" : "GMS_TEST_UNAVAILABLE_ID"]: first,
       });
       expect(result.exitCode, result.stderr).toBe(1);
-      expect(result.stderr).toContain("已保存 0，失败 1，未处理 1");
-      expect(result.stderr).toContain("浏览器清理失败");
+      const stopped = blocked || closeFailure;
+      expect(result.stderr).toContain(
+        stopped ? "已保存 0，失败 1，未处理 1" : "已保存 1，失败 1，未处理 0",
+      );
+      expect(result.stderr).toContain(
+        blocked ? "HTTP 429" : "当前 Post 详情不可读取",
+      );
+      if (blocked) expect(result.stderr).toContain("服务端建议等待 60");
+      if (closeFailure) expect(result.stderr).toContain("浏览器清理失败");
+      const output = result.stdout + result.stderr;
+      for (const secret of [
+        "fixture-token",
+        databaseEnv.GROK_DB_PASSWORD ?? "isolated-test-password",
+        "private-query",
+      ])
+        expect(output).not.toContain(secret);
       const [run] = await testSql<{ summary: unknown }[]>`
       SELECT summary FROM runs WHERE command='retry'`;
-      expect(run?.summary).toEqual({ saved: 0, failed: 1, unprocessed: 1 });
+      expect(run?.summary).toEqual({
+        saved: stopped ? 0 : 1,
+        failed: 1,
+        unprocessed: stopped ? 1 : 0,
+      });
       const [later] = await testSql<{ last_run_id: string | null }[]>`
       SELECT last_run_id FROM post_work WHERE post_id=${second}`;
-      expect(later?.last_run_id).toBeNull();
+      if (stopped) expect(later?.last_run_id).toBeNull();
+      else expect(later?.last_run_id).not.toBeNull();
     } finally {
       await rm(root, { recursive: true, force: true });
     }
