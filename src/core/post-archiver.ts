@@ -41,6 +41,7 @@ type Store = {
       relativePath: string;
       publishBytes: string;
       sha256: string;
+      mimeType: string;
     },
   ): Promise<void>;
   failDownload(postId: string, runId: string, reason: string): Promise<void>;
@@ -132,7 +133,9 @@ export async function archivePost({
       work?.status === "saved" &&
       work.selectedKey === detail.selection.key &&
       work.quality === detail.selection.quality &&
-      work.mimeType === detail.selection.mimeType &&
+      (work.mimeType === detail.selection.mimeType ||
+        (work.mimeType === "image/jpeg" &&
+          detail.selection.mimeType === "image/png")) &&
       (work.expectedBytes === null ||
         detail.selection.expectedBytes === undefined ||
         Number(work.expectedBytes) === detail.selection.expectedBytes) &&

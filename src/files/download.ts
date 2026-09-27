@@ -61,7 +61,8 @@ export async function downloadToTemp(
     total: 900_000,
   },
 ) {
-  const format = formats[selection.mimeType.toLowerCase()];
+  const selectedMimeType = selection.mimeType.toLowerCase();
+  const format = formats[selectedMimeType];
   if (!format || !selection.key)
     throw new Error("所选媒体类型或地址不受支持。");
   const rootPath = await realpath(root);
@@ -216,8 +217,16 @@ export async function downloadToTemp(
     if (!sawHeaders || !sawChunk || count !== expected)
       throw new RetryableMediaError("媒体响应未正常完整结束或长度不符。");
     onStage?.(`媒体响应流 EOF；实写 ${count} 字节`);
-    if (!format.signature(firstBytes))
-      throw new RetryableMediaError("媒体文件头与所选类型不符。");
+    let savedMimeType = selectedMimeType;
+    if (!format.signature(firstBytes)) {
+      if (
+        selectedMimeType !== "image/png" ||
+        !formats["image/jpeg"].signature(firstBytes)
+      )
+        throw new RetryableMediaError("媒体文件头与所选类型不符。");
+      savedMimeType = "image/jpeg";
+      onStage?.("Grok 声明 PNG，但媒体文件头为 JPEG；按 JPEG 保存。");
+    }
     await file.sync();
     try {
       await file.close();
@@ -240,10 +249,10 @@ export async function downloadToTemp(
     intentCreated = true;
     return {
       tempName,
-      relativePath: `${postId}/${sha256}.${format.ext}`,
+      relativePath: `${postId}/${sha256}.${formats[savedMimeType].ext}`,
       publishBytes: String(count),
       sha256,
-      mimeType: selection.mimeType,
+      mimeType: savedMimeType,
     };
   } catch (error) {
     if (

@@ -207,12 +207,13 @@ export async function recordPublishIntent(
     relativePath: string;
     publishBytes: string;
     sha256: string;
+    mimeType: string;
   },
 ): Promise<void> {
   const updated = await session<{ post_id: string }[]>`
     UPDATE post_work SET status = 'finalizing', last_run_id = ${runId}::uuid,
       selected_key = ${selection.key ?? null}, quality = ${selection.quality},
-      mime_type = ${selection.mimeType}, expected_bytes = ${selection.expectedBytes ?? null},
+      mime_type = ${intent.mimeType}, expected_bytes = ${selection.expectedBytes ?? null},
       publish_temp_name = ${intent.tempName}, publish_relative_path = ${intent.relativePath},
       publish_expected_bytes = ${intent.publishBytes}::bigint, publish_sha256 = ${intent.sha256},
       last_error = NULL

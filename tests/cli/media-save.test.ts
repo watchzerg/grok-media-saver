@@ -31,6 +31,10 @@ const png = Buffer.from(
   "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489",
   "hex",
 );
+const mislabeledJpeg = Buffer.from(
+  "ffd8ffe000104a464946000101000001ffd9",
+  "hex",
+);
 const mp4 = Buffer.from("000000186674797069736f6d0000000069736f6d", "hex");
 let archiveRoot: string | undefined;
 
@@ -100,6 +104,86 @@ test("S1 saves a complete selected image through the download capability", async
     { status: string }[]
   >`SELECT status FROM post_work WHERE post_id = ${postId}`;
   expect(work?.status).toBe("saved");
+});
+
+test("S1 saves a PNG-declared JPEG as JPEG and reuses that version", async () => {
+  const config = await setup();
+  let downloads = 0;
+  const connect = async () => ({
+    getPostDetail: async () => ({
+      kind: "post" as const,
+      selection: {
+        assetId: postId,
+        key: "https://assets.grok.com/image.jpg",
+        mimeType: "image/png",
+        quality: "image" as const,
+        expectedBytes: mislabeledJpeg.length,
+      },
+    }),
+    downloadMedia: async (
+      _selection: unknown,
+      onResponse: (headers: {
+        status: number;
+        contentType: string;
+        contentLength: string;
+        contentEncoding: null;
+      }) => Promise<void>,
+      onChunk: (chunk: Uint8Array) => Promise<void>,
+    ) => {
+      downloads += 1;
+      await onResponse({
+        status: 200,
+        contentType: "image/png",
+        contentLength: String(mislabeledJpeg.length),
+        contentEncoding: null,
+      });
+      await onChunk(mislabeledJpeg);
+    },
+    close: async () => {},
+  });
+  const first = await saveSelectedPost(
+    config,
+    postId,
+    new AbortController().signal,
+    undefined,
+    connect,
+  );
+  expect(first.status, first.message).toBe("ok");
+  const [saved] = await testSql<
+    { workMimeType: string; versionMimeType: string; relativePath: string }[]
+  >`
+    SELECT w.mime_type AS "workMimeType", v.mime_type AS "versionMimeType",
+      v.relative_path AS "relativePath"
+    FROM post_work w JOIN media_versions v ON v.id = w.saved_media_version_id
+    WHERE w.post_id = ${postId}
+  `;
+  expect(saved.workMimeType).toBe("image/jpeg");
+  expect(saved.versionMimeType).toBe("image/jpeg");
+  expect(saved.relativePath).toEndWith(".jpg");
+  expect(await readFile(join(config.archiveRoot, saved.relativePath))).toEqual(
+    mislabeledJpeg,
+  );
+  expect(
+    (
+      await verifySavedPost(
+        readVerifyConfig({
+          ...databaseEnv,
+          GROK_ARCHIVE_DIR: config.archiveRoot,
+        }),
+        postId,
+      )
+    ).status,
+  ).toBe("ok");
+  const second = await saveSelectedPost(
+    config,
+    postId,
+    new AbortController().signal,
+    undefined,
+    connect,
+  );
+  expect(second.status, second.message).toBe("ok");
+  expect(second.message).toContain("复用");
+  expect(downloads).toBe(1);
 });
 
 test("S1 explicit save rereads a saved Post and reuses a verified version", async () => {
@@ -1024,6 +1108,16 @@ test.each([
       contentEncoding: null,
     },
     png,
+  ],
+  [
+    "JPEG response for a PNG selection",
+    {
+      status: 200,
+      contentType: "image/jpeg",
+      contentLength: String(mislabeledJpeg.length),
+      contentEncoding: null,
+    },
+    mislabeledJpeg,
   ],
   [
     "bad signature",
