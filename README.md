@@ -21,7 +21,7 @@ just gate-full
 mise exec -- bun src/cli.ts inspect first-page
 ```
 
-命令只读取一次 Saved 第一页，不展开 Post，不建立 Run 或 Post 工作。正式连接、第一页响应、关闭连接和重新连接已完成现场验收；Saved 页的首请求为 `workspaceKind=WORKSPACE_KIND_IMAGINE_ALL`、`pageSize=40`。取消竞速、真实断连故障及清理失败仍需按[一期浏览器验收要求](docs/research/phase1-browser-session.md#尚未验证与首个切片的验收)验证。
+命令只读取一次 Saved 第一页，不展开 Post，不建立 Run 或 Post 工作。正式连接、第一页响应、关闭连接和重新连接已完成现场验收；Saved 页的首请求为 `workspaceKind=WORKSPACE_KIND_IMAGINE_ALL`、`pageSize=40`。此只读命令的取消竞速、真实断连故障及清理失败尚无单独现场证据；普通媒体保存的正式取消结果见[一期验收记录](docs/research/phase1-acceptance.md#正式浏览器与普通媒体)。
 
 ## 保存 Saved 第一页
 
@@ -32,6 +32,8 @@ mise exec -- bun src/cli.ts save first-page
 ```
 
 命令需要已初始化的项目数据库、归档目录和 Playwright Extension 配置。空页成功并记录零数量；普通单 Post 失败继续后续成员，阻挡、停止或基础资源故障停止安排新成员。终端及已正常收尾的 Run 显示已保存、失败和未处理数量；第一页最终不可读取时，Run 摘要数量未知。有失败或未处理时退出 `1`，首次 Ctrl+C 退出 `130`。未开始的列表成员不会预建 Post 工作。
+
+2026-09-27 的正式整页运行处理了 40 个成员：31 条保存、9 条因声明为 PNG 但文件头不符而失败、0 条未处理，命令退出 `1`；失败项没有被发布为已保存。代表性 JPEG 和 MP4 的独立 `verify` 通过。现场证据、响应冲突的只读核对及限制见[一期验收记录](docs/research/phase1-acceptance.md#本票正式单页保存)。
 
 ## 初始化项目数据库
 
@@ -96,6 +98,8 @@ mise exec -- bun src/cli.ts inspect post <Post-ID>
 - [产品目标与首版范围](docs/specs/product-goals.md)：已确认的目标基线、产品原则与完成标准。
 - [架构设计](ARCHITECTURE.md)：已确认的模块职责、运行方式与恢复方向。
 - [一期可靠保存规格](docs/specs/phase1-saving.md)：一期行为、持久事实、恢复及测试边界。
+- [一期开发者运行与恢复](docs/development/phase1-runbook.md)：安装、配置、命令、核验与中断接续。
+- [一期验收记录](docs/research/phase1-acceptance.md)：正式浏览器与本地边界的证据、限制。
 - [实现路线图](docs/development/implementation-roadmap.md)：三期范围、依赖、风险验证时点与结束标准。
 - [详细文档索引](docs/INDEX.md)：文档分类、权威来源与维护规则。
 - [Beads 约定](docs/agents/issue-tracker.md)：issue 和 spec 的操作入口。

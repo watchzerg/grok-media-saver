@@ -57,12 +57,12 @@
 - `just test` 或 `just test all` 运行当前全部 Bun 测试；`just test core`
   运行 `tests/core`。可在 scope 后传测试路径和 Bun 的 `-t <name>`，
   也可直接传路径或 Bun 测试筛选参数；无法收窄时运行完整相关 suite。
-  目前尚无测试，零匹配或测试收集失败须返回非零。
-- `just gate-core` 无参数运行 Bun 版本检查、TypeScript 静态检查与 Biome CI，
-  是当前的快速基础检查；目前没有可运行的基础回归测试，也不启动数据库、
-  浏览器或系统边界。`just gate-full` 无参数运行当前完整验收，即现有
-  `gate-core`；新增测试、构建或真实边界时，须将必要验证纳入相应 gate。
-  当前没有服务或凭据准备要求；人工、线上及真实凭据验收不在此 gate 结论内。
+  零匹配或测试收集失败须返回非零。
+- `just gate-core` 无参数运行 Bun 版本检查、TypeScript 静态检查、
+  `tests/core` 与 Biome CI，不启动外部服务。`just gate-full` 无参数先运行
+  `gate-core`，再运行 `tests/cli`；CLI 测试使用隔离 Docker PostgreSQL、
+  临时文件和真实子进程，不连接 Chrome、Extension 或 Grok。宿主须能运行
+  Docker 与 `postgres:18-alpine` 镜像；现场浏览器验收另行记录。
   agent 验证通过 just 入口执行；格式化使用 `just fmt [files...]`。
 - **版本策略**：`package.json` 中只有 Biome exact-pinned（格式化与 lint 的
   验证 identity），其余直接依赖用 caret range；`bun.lock` 必须提交，不因

@@ -183,7 +183,7 @@ Run controller 选择并串行安排目标，所有保存入口复用 Post archi
 
 采用少量代表性场景及必要故障点，不穷举交叉组合。DB 使用隔离 Docker PostgreSQL，文件使用临时目录，进程行为使用真实子进程。浏览器相关自动化仅采用方案 A；不建设真实 Chrome + Extension + 本地受控服务的方案 B，也不将其列为延期必补项。
 
-`just gate-core` 在现有静态检查上加入无需外部服务的快速核心测试；`just gate-full` 再包含真实 DB、文件与 CLI 边界测试。两者均不需要 Chrome、Extension token 或 Grok 登录态。日常经 `just test` 运行最窄有效 suite，交付前对最终候选执行无筛选 `just gate-full`；零匹配不算通过。这是将来实现要求，当前门禁仍仅覆盖仓库基线。
+`just gate-core` 在静态检查上运行无需外部服务的快速核心测试；`just gate-full` 再包含真实 DB、文件与 CLI 边界测试。两者均不需要 Chrome、Extension token 或 Grok 登录态。日常经 `just test` 运行最窄有效 suite，交付前对最终候选执行无筛选 `just gate-full`；零匹配不算通过。
 
 ### 现场验收与交付阻断
 

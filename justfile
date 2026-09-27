@@ -1,4 +1,4 @@
-# 当前只有工具链基座；新增测试或应用边界时将相应验证加入 gate-core/gate-full。
+# 当前 gate-core 包含快速核心测试；gate-full 另运行真实 CLI/隔离 DB 边界测试。
 set shell := ["bash", "-cu"]
 set positional-arguments := true
 

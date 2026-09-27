@@ -8,8 +8,8 @@
 | --- | --- | --- |
 | `agents/` | agent 工作流与详细规则 | [Beads](agents/issue-tracker.md)、[triage labels](agents/triage-labels.md)、[领域文档规则](agents/domain.md) |
 | `specs/` | 已确认、需要在仓库中维护的产品或配置契约 | [产品目标与首版范围](specs/product-goals.md)、[一期可靠保存规格](specs/phase1-saving.md) |
-| `research/` | 带版本和观察时点的调研、实验与证据 | [归档核心模型与 HTTP 参考](research/core-archive-model-and-http.md)、[Playwright Extension 媒体下载验证](research/2026-09-25-grok-playwright-extension-demo.md) |
-| `development/` | 实现路线、开发、构建、测试与依赖维护说明 | [实现路线图](development/implementation-roadmap.md) |
+| `research/` | 带版本和观察时点的调研、实验与证据 | [一期验收记录](research/phase1-acceptance.md)、[归档核心模型与 HTTP 参考](research/core-archive-model-and-http.md)、[Playwright Extension 媒体下载验证](research/2026-09-25-grok-playwright-extension-demo.md) |
+| `development/` | 实现路线、开发、构建、测试与依赖维护说明 | [一期开发者运行与恢复](development/phase1-runbook.md)、[实现路线图](development/implementation-roadmap.md) |
 
 按需新增以下分类，不预建空目录：
 
