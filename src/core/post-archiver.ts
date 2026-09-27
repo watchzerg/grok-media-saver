@@ -1,6 +1,7 @@
 import { cleanupPublishedTemp, publishIntent } from "../files/publish-intent";
 import { checkArchiveFile } from "../files/verify";
 import type { PostMediaSelection, PostResponse } from "../grok/adapter";
+import { RetryableRequestError } from "../grok/adapter";
 import type { Work } from "../store/save-work";
 
 type Store = {
@@ -31,6 +32,7 @@ export async function archivePost({
   onStage,
   store,
   getDetail,
+  waitBeforeRetry,
   runId,
 }: {
   postId: string;
@@ -39,6 +41,7 @@ export async function archivePost({
   onStage?: (stage: string) => void;
   store: Store;
   getDetail(signal: AbortSignal): Promise<PostResponse>;
+  waitBeforeRetry: (signal: AbortSignal) => Promise<void>;
   runId: string;
 }) {
   let saved = false;
@@ -85,7 +88,24 @@ export async function archivePost({
   } else {
     await store.assertLock();
     onStage?.("读取当前详情");
-    const detail = await getDetail(signal);
+    let detail: PostResponse;
+    for (let attempt = 1; ; attempt += 1) {
+      if (signal.aborted) throw new Error("保存已停止。");
+      try {
+        detail = await getDetail(signal);
+      } catch (error) {
+        if (signal.aborted) throw new Error("保存已停止。");
+        if (!(error instanceof RetryableRequestError) || attempt >= 2)
+          throw error;
+        await waitBeforeRetry(signal);
+        await store.assertLock();
+        continue;
+      }
+      if (signal.aborted) throw new Error("保存已停止。");
+      if (detail.kind !== "temporary" || attempt >= 2) break;
+      await waitBeforeRetry(signal);
+      await store.assertLock();
+    }
     if (detail.kind !== "post") {
       if (detail.kind === "blocked") {
         const reason =

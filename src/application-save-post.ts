@@ -35,6 +35,7 @@ export type SavePostSession = {
 
 export type SavePostOptions = {
   connect(signal: AbortSignal): Promise<SavePostSession>;
+  waitBeforeRetry: (signal: AbortSignal) => Promise<void>;
   signal?: AbortSignal;
   onStage?: (stage: string) => void;
 };
@@ -42,6 +43,8 @@ export type SavePostOptions = {
 export type SavePostResult = {
   status: "ok" | "blocked" | "failed" | "cancelled";
   message: string;
+  // true: a saved fact for this Post was observed or committed; null: DB write outcome unknown.
+  saveRecorded: boolean | null;
   cleanupErrors: string[];
 };
 
@@ -71,6 +74,7 @@ export async function savePost(
   const result: SavePostResult = {
     status: "failed",
     message: "Post 保存未完成。",
+    saveRecorded: false,
     cleanupErrors: [],
   };
   const write = async <T>(operation: () => Promise<T>): Promise<T> => {
@@ -107,12 +111,18 @@ export async function savePost(
       signal,
       onStage: options.onStage,
       store: {
-        readWork: (id) => readWork(activeSession, id),
+        readWork: async (id) => {
+          const work = await readWork(activeSession, id);
+          if (work?.status === "saved") result.saveRecorded = true;
+          return work;
+        },
         startWork: (id, run) => write(() => startWork(activeSession, id, run)),
         clearMissingIntent: (id, work, run) =>
           write(() => clearMissingIntent(activeSession, id, work, run)),
-        settleIntent: (id, work, run) =>
-          write(() => settleIntent(activeSession, id, work, run)),
+        settleIntent: async (id, work, run) => {
+          await write(() => settleIntent(activeSession, id, work, run));
+          result.saveRecorded = true;
+        },
         failUnreadableDetail: (id, run) =>
           write(() => failUnreadableDetail(activeSession, id, run)),
         readSavedVersion: (id, version) =>
@@ -124,9 +134,10 @@ export async function savePost(
         assertLock: () => assertExecutorLock(activeSession),
       },
       getDetail: async (detailSignal) => {
-        browser = await options.connect(detailSignal);
+        browser ??= await options.connect(detailSignal);
         return browser.getPostDetail(postId, detailSignal);
       },
+      waitBeforeRetry: options.waitBeforeRetry,
       runId,
     });
     Object.assign(result, postResult);
@@ -138,6 +149,8 @@ export async function savePost(
     }
   } catch (error) {
     if (error instanceof KnownSaveFailure) runWriteUnknown = false;
+    if (runWriteUnknown && result.saveRecorded === false)
+      result.saveRecorded = null;
     result.status = signal.aborted && !runWriteUnknown ? "cancelled" : "failed";
     result.message = runWriteUnknown
       ? `数据库提交结果未知，已停止：${safeSaveError(error, config)}`

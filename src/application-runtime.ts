@@ -611,6 +611,7 @@ export async function saveSelectedPost(
   return savePost(config, postId, {
     signal,
     onStage,
+    waitBeforeRetry: scheduler.beforeRequest,
     connect:
       connect ??
       ((connectSignal) =>

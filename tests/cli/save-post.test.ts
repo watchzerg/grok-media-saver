@@ -3,6 +3,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  readFile,
   rm,
   symlink,
   writeFile,
@@ -20,7 +21,10 @@ import {
   readVerifyConfig,
 } from "../../src/config";
 import { checkArchiveFile } from "../../src/files/verify";
-import { parsePostDetailResponse } from "../../src/grok/adapter";
+import {
+  parsePostDetailResponse,
+  RetryableRequestError,
+} from "../../src/grok/adapter";
 import { databaseEnv, testSql, useIsolatedPostgres } from "../helpers/postgres";
 
 useIsolatedPostgres();
@@ -153,6 +157,7 @@ test("matching final file settles intent while an unrelated temp name remains un
   const result = await saveViaApplication(config, postId, matchingDetail());
   expect(result.status).toBe("failed");
   expect(result.message).toContain("已保存");
+  expect(result.saveRecorded).toBe(true);
   expect(
     await Bun.file(join(config.archiveRoot, relativePath)).bytes(),
   ).toEqual(bytes);
@@ -288,6 +293,71 @@ test("current detail failure retains the recovered media version", async () => {
   expect(work?.saved_media_version_id).toBeTruthy();
 });
 
+test.each(["408", "503", "network"])(
+  "save post retries a %s detail failure once before reusing the recovered file",
+  async (failure) => {
+    const config = await seed();
+    await writeFile(join(config.archiveRoot, relativePath), bytes);
+    let attempts = 0;
+    const result = await saveViaApplication(config, postId, {
+      connect: async () => ({
+        getPostDetail: async () => {
+          attempts += 1;
+          if (attempts === 1) {
+            if (failure === "network")
+              throw new RetryableRequestError("fixture network failure");
+            return { kind: "temporary", status: Number(failure) };
+          }
+          return (await matchingDetail().connect()).getPostDetail();
+        },
+        close: async () => {},
+      }),
+    });
+    expect(attempts).toBe(2);
+    expect(result.status).toBe("ok");
+    expect(result.saveRecorded).toBe(true);
+  },
+);
+
+test("save post stops after the second temporary detail failure", async () => {
+  const config = await seed();
+  await writeFile(join(config.archiveRoot, relativePath), bytes);
+  let attempts = 0;
+  const result = await saveViaApplication(config, postId, {
+    connect: async () => ({
+      getPostDetail: async () => {
+        attempts += 1;
+        return { kind: "temporary", status: 503 };
+      },
+      close: async () => {},
+    }),
+  });
+  expect(attempts).toBe(2);
+  expect(result.status).toBe("failed");
+  expect(result.saveRecorded).toBe(true);
+});
+
+test("stop during detail response does not record a successful Run", async () => {
+  const config = await seed();
+  await writeFile(join(config.archiveRoot, relativePath), bytes);
+  const controller = new AbortController();
+  const result = await saveViaApplication(config, postId, {
+    signal: controller.signal,
+    connect: async () => ({
+      getPostDetail: async () => {
+        controller.abort();
+        return (await matchingDetail().connect()).getPostDetail();
+      },
+      close: async () => {},
+    }),
+  });
+  expect(result.status).toBe("cancelled");
+  const [run] = await testSql<{ outcome: string }[]>`
+    SELECT outcome FROM runs ORDER BY started_at DESC LIMIT 1
+  `;
+  expect(run?.outcome).toBe("stopped");
+});
+
 test("current applicable size conflict does not reuse recovered file", async () => {
   const config = await seed();
   await writeFile(join(config.archiveRoot, relativePath), bytes);
@@ -411,6 +481,88 @@ test("real CLI resumes a matching final and reports a verifiable save", async ()
   ).toBe("ok");
 });
 
+test("real CLI retries temporary detail after the shared request interval", async () => {
+  const config = await seed();
+  await writeFile(join(config.archiveRoot, relativePath), bytes);
+  const timesPath = join(config.archiveRoot, "request-times");
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--no-env-file",
+      "--preload",
+      "./tests/helpers/fake-save-browser.ts",
+      "src/cli.ts",
+      "save",
+      "post",
+      postId,
+    ],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...databaseEnv,
+        GROK_ARCHIVE_DIR: config.archiveRoot,
+        PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+        GROK_API_INTERVAL_MIN_SECONDS: "0.08",
+        GROK_API_INTERVAL_MAX_SECONDS: "0.08",
+        GMS_TEST_RETRY_DETAIL: "1",
+        GMS_TEST_REQUEST_TIMES: timesPath,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" });
+  expect(stdout).toContain("Post 保存完成");
+  const times = (await readFile(timesPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map(Number);
+  expect(times).toHaveLength(2);
+  expect((times[1] ?? 0) - (times[0] ?? 0)).toBeGreaterThanOrEqual(70);
+});
+
+test("real CLI stops if SIGINT arrives while detail is returning", async () => {
+  const config = await seed();
+  await writeFile(join(config.archiveRoot, relativePath), bytes);
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--no-env-file",
+      "--preload",
+      "./tests/helpers/fake-save-browser.ts",
+      "src/cli.ts",
+      "save",
+      "post",
+      postId,
+    ],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...databaseEnv,
+        GROK_ARCHIVE_DIR: config.archiveRoot,
+        PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+        GMS_TEST_ABORT_DETAIL: "1",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [stderr, exitCode] = await Promise.all([
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(exitCode, stderr).toBe(130);
+  const [run] = await testSql<{ outcome: string }[]>`
+    SELECT outcome FROM runs ORDER BY started_at DESC LIMIT 1
+  `;
+  expect(run?.outcome).toBe("stopped");
+});
+
 test.each(["正式文件已发布", "提交保存结果", "保存结果已提交"])(
   "stop at %s preserves a resumable or saved fact",
   async (stopAt) => {
@@ -487,6 +639,7 @@ test("temp cleanup failure keeps saved fact and reports failure", async () => {
     const result = await saveViaApplication(config, postId, matchingDetail());
     expect(result.status).toBe("failed");
     expect(result.message).toContain("已保存");
+    expect(result.saveRecorded).toBe(true);
     expect(result.cleanupErrors.join(" ")).toContain("清理失败");
     const [work] = await testSql<
       { status: string }[]
