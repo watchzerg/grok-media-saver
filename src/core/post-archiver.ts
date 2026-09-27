@@ -1,16 +1,13 @@
-import {
-  BlockedMediaError,
-  discardDownloadedTemp,
-  downloadToTemp,
-  MediaCapabilityUnavailableError,
-  type MediaSource,
-  RetryableMediaError,
-} from "../files/download";
-import { cleanupPublishedTemp, publishIntent } from "../files/publish-intent";
-import { checkArchiveFile } from "../files/verify";
 import type { PostMediaSelection, PostResponse } from "../grok/adapter";
 import { RetryableRequestError } from "../grok/adapter";
 import { KnownSaveFailure, type Work } from "../store/save-work";
+import {
+  BlockedMediaError,
+  type FileCapabilities,
+  MediaCapabilityUnavailableError,
+  type MediaSource,
+  RetryableMediaError,
+} from "./file-capabilities";
 
 type Store = {
   readWork(postId: string): Promise<Work | undefined>;
@@ -52,7 +49,7 @@ type Store = {
 
 export async function archivePost({
   postId,
-  archiveRoot,
+  files,
   signal,
   onStage,
   store,
@@ -64,7 +61,7 @@ export async function archivePost({
   runId,
 }: {
   postId: string;
-  archiveRoot: string;
+  files: FileCapabilities;
   signal: AbortSignal;
   onStage?: (stage: string) => void;
   store: Store;
@@ -93,8 +90,7 @@ export async function archivePost({
   if (work?.status === "finalizing") {
     onStage?.("核对发布意图");
     if (signal.aborted) throw new Error("保存已停止；发布意图已保留。");
-    const publication = await publishIntent(
-      archiveRoot,
+    const publication = await files.publishIntent(
       postId,
       work,
       signal,
@@ -108,7 +104,7 @@ export async function archivePost({
       await store.settleIntent(postId, work, runId);
       saved = true;
       onStage?.("保存结果已提交");
-      const cleanup = await cleanupPublishedTemp(archiveRoot, postId, work);
+      const cleanup = await files.cleanupPublishedTemp(postId, work);
       if (cleanup) result.cleanupErrors.push(cleanup);
     }
     work = await store.readWork(postId);
@@ -152,8 +148,7 @@ export async function archivePost({
         version &&
         (detail.selection.expectedBytes === undefined ||
           Number(version.byteCount) === detail.selection.expectedBytes)
-          ? await checkArchiveFile(
-              archiveRoot,
+          ? await files.checkArchiveFile(
               version.relativePath,
               Number(version.byteCount),
               version.sha256,
@@ -198,10 +193,9 @@ export async function archivePost({
       await waitBeforeRetry(signal);
       if (signal.aborted) throw new Error("保存已停止。");
       onStage?.("下载当前媒体");
-      let intent: Awaited<ReturnType<typeof downloadToTemp>>;
+      let intent: Awaited<ReturnType<FileCapabilities["downloadToTemp"]>>;
       try {
-        intent = await downloadToTemp(
-          archiveRoot,
+        intent = await files.downloadToTemp(
           postId,
           selection,
           downloadMedia,
@@ -249,7 +243,7 @@ export async function archivePost({
         await store.assertLock();
         if (signal.aborted) throw new Error("保存已停止。");
       } catch (error) {
-        await discardDownloadedTemp(archiveRoot, postId, intent);
+        await files.discardDownloadedTemp(postId, intent);
         throw error;
       }
       onStage?.("提交发布意图");
@@ -257,14 +251,13 @@ export async function archivePost({
         await store.recordPublishIntent(postId, runId, selection, intent);
       } catch (error) {
         if (error instanceof KnownSaveFailure)
-          await discardDownloadedTemp(archiveRoot, postId, intent);
+          await files.discardDownloadedTemp(postId, intent);
         throw error;
       }
       const work = await store.readWork(postId);
       if (work?.status !== "finalizing")
         throw new Error("发布意图提交后无法确认工作状态。");
-      const publication = await publishIntent(
-        archiveRoot,
+      const publication = await files.publishIntent(
         postId,
         work,
         signal,
@@ -277,7 +270,7 @@ export async function archivePost({
       await store.settleIntent(postId, work, runId);
       saved = true;
       onStage?.("保存结果已提交");
-      const cleanup = await cleanupPublishedTemp(archiveRoot, postId, work);
+      const cleanup = await files.cleanupPublishedTemp(postId, work);
       if (cleanup) result.cleanupErrors.push(cleanup);
       result.status = "ok";
       result.message = "Post 保存完成。";

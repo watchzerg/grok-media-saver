@@ -1,6 +1,8 @@
 import bundle from "playwright-core/lib/coreBundle";
-import type { MediaSource } from "../files/download";
-import { RetryableMediaError } from "../files/download";
+import {
+  type MediaSource,
+  RetryableMediaError,
+} from "../core/file-capabilities";
 import type {
   PageResponse,
   PostResponse,

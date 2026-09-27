@@ -1,10 +1,13 @@
 import type { ReservedSQL } from "bun";
 import type { SaveConfig } from "./config";
-import { archivePost } from "./core/post-archiver";
 import {
   MediaCapabilityUnavailableError,
   type MediaSource,
-} from "./files/download";
+} from "./core/file-capabilities";
+import { archivePost } from "./core/post-archiver";
+import { discardDownloadedTemp, downloadToTemp } from "./files/download";
+import { cleanupPublishedTemp, publishIntent } from "./files/publish-intent";
+import { checkArchiveFile } from "./files/verify";
 import type { PostResponse } from "./grok/adapter";
 import { connectDatabase, safeDatabaseError } from "./store/database";
 import {
@@ -91,7 +94,33 @@ export async function archivePostInRun(
   try {
     const archived = await archivePost({
       postId,
-      archiveRoot: config.archiveRoot,
+      files: {
+        checkArchiveFile: (path, bytes, sha256) =>
+          checkArchiveFile(config.archiveRoot, path, bytes, sha256),
+        downloadToTemp: (
+          id,
+          selection,
+          source,
+          transferSignal,
+          onStage,
+          timeouts,
+        ) =>
+          downloadToTemp(
+            config.archiveRoot,
+            id,
+            selection,
+            source,
+            transferSignal,
+            onStage,
+            timeouts,
+          ),
+        discardDownloadedTemp: (id, intent) =>
+          discardDownloadedTemp(config.archiveRoot, id, intent),
+        publishIntent: (id, work, publishSignal, onStage) =>
+          publishIntent(config.archiveRoot, id, work, publishSignal, onStage),
+        cleanupPublishedTemp: (id, work) =>
+          cleanupPublishedTemp(config.archiveRoot, id, work),
+      },
       signal,
       onStage: options.onStage,
       store: {

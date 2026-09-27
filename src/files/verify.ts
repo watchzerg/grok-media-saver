@@ -2,14 +2,7 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-
-export type ArchiveCheck =
-  | { status: "ok" }
-  | { status: "missing" }
-  | { status: "directory" }
-  | { status: "symlink" }
-  | { status: "mismatch" }
-  | { status: "failed"; reason: string };
+import type { ArchiveCheck } from "../core/file-capabilities";
 
 export async function checkArchiveFile(
   archiveRoot: string,

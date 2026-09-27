@@ -1,29 +1,15 @@
 import { constants, createReadStream } from "node:fs";
 import { mkdir, open, realpath, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
+import {
+  BlockedMediaError,
+  FatalMediaError,
+  type MediaSource,
+  RetryableMediaError,
+} from "../core/file-capabilities";
 import type { PostMediaSelection } from "../grok/adapter";
 import { UnconfirmedStopError } from "../grok/adapter";
 import { checkArchiveFile } from "./verify";
-
-export type MediaHeaders = {
-  status: number;
-  contentType: string;
-  contentLength: string | null;
-  contentEncoding: string | null;
-  retryAfter?: string | null;
-  finalUrl?: string;
-};
-export type MediaSource = (
-  selection: PostMediaSelection,
-  onResponse: (headers: MediaHeaders) => Promise<void>,
-  onChunk: (chunk: Uint8Array) => Promise<void>,
-  signal: AbortSignal,
-) => Promise<void>;
-
-export class RetryableMediaError extends Error {}
-export class BlockedMediaError extends Error {}
-export class FatalMediaError extends Error {}
-export class MediaCapabilityUnavailableError extends Error {}
 
 const formats: Record<
   string,
