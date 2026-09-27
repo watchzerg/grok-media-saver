@@ -371,7 +371,8 @@ export async function retryUnfinishedPosts(
                       counts.failed || counts.unprocessed || stopReason
                         ? "failed"
                         : "ok",
-                    message: `${targets.length ? "重试结束" : "没有未完成 Post，重试 Run 已正常结束"}：已保存 ${counts.saved}，失败 ${counts.failed}，未处理 ${counts.unprocessed}。${[...postErrors, stopReason].filter(Boolean).join(" ")}`,
+                    message:
+                      `${targets.length ? "重试结束。" : "没有未完成 Post，重试 Run 已正常结束。"} ${[...postErrors, stopReason].filter(Boolean).join(" ")}`.trim(),
                     cleanupErrors: result.cleanupErrors,
                   };
             }
@@ -386,7 +387,9 @@ export async function retryUnfinishedPosts(
     } else if (signal?.aborted) {
       result = {
         status: "cancelled",
-        message: "重试已停止。",
+        message: runWriteUnknown
+          ? "重试已停止；Run 写入结果未知，未确认记账。"
+          : "重试已停止。",
         cleanupErrors: result.cleanupErrors,
       };
       if (
@@ -484,9 +487,11 @@ export async function retryUnfinishedPosts(
     result.status = "cancelled";
     if (!result.message.includes("停止"))
       result.message = "收到停止信号；Run 已完成必要收尾。";
-    if (countsKnown && !result.message.includes("未处理"))
-      result.message = `${result.message} 已保存 ${counts.saved}，失败 ${counts.failed}，未处理 ${counts.unprocessed}。`;
   }
+  if (countsKnown)
+    result.message = runWriteUnknown
+      ? `${result.message} 已确认处理：已保存 ${counts.saved}，失败 ${counts.failed}；剩余 ${counts.unprocessed} 项结果未确认。`
+      : `${result.message} 已保存 ${counts.saved}，失败 ${counts.failed}，未处理 ${counts.unprocessed}。`;
   return result;
 }
 

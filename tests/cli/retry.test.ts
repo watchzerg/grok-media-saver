@@ -25,6 +25,7 @@ test("retry records a successful empty run without connecting to the browser", a
   const result = await runCli(databaseEnv, ["retry"]);
   expect(result.exitCode, JSON.stringify(result)).toBe(0);
   expect(result.stdout).toContain("没有未完成 Post");
+  expect(result.stdout).toContain("已保存 0，失败 0，未处理 0");
   expect(result.stdout).not.toContain("阶段：");
   expect(result.stderr).toBe("");
 
@@ -147,6 +148,9 @@ test("retry does not compensate after a failed Run completion write", async () =
     const result = await runCli(databaseEnv, ["retry"]);
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("结果未知");
+    expect(result.stderr).toContain(
+      "已确认处理：已保存 0，失败 0；剩余 0 项结果未确认",
+    );
     const [run] = await testSql<
       { outcome: string | null; finished_at: Date | null }[]
     >`SELECT outcome, finished_at FROM runs WHERE command = 'retry'`;
@@ -410,6 +414,7 @@ test("SIGINT after a nonempty retry snapshot records known unprocessed counts", 
     child.kill("SIGINT");
     const result = await collectCli(child);
     expect(result.exitCode).toBe(130);
+    expect(result.stderr).toContain("已保存 0，失败 0，未处理 1");
     const [run] = await testSql<{ outcome: string; summary: unknown }[]>`
       SELECT outcome,summary FROM runs WHERE command='retry'`;
     expect(run).toEqual({
@@ -845,6 +850,7 @@ test("retry leaves its Run open and later work untouched after losing its lock m
     });
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("执行器会话锁已丢失");
+    expect(result.stderr).toContain("已保存 1，失败 0，未处理 1");
     const [later] = await testSql<
       { status: string; last_run_id: string | null }[]
     >`
@@ -875,6 +881,7 @@ test("retry stops later work when browser cleanup fails after a saved Post", asy
     });
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("浏览器清理失败");
+    expect(result.stderr).toContain("已保存 1，失败 0，未处理 1");
     const [firstWork] = await testSql<{ status: string }[]>`
       SELECT status FROM post_work WHERE post_id=${first}`;
     expect(firstWork?.status).toBe("saved");
@@ -892,6 +899,67 @@ test("retry stops later work when browser cleanup fails after a saved Post", asy
   }
 });
 
+test("retry CLI keeps completed counts when database cleanup fails", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-db-cleanup-"));
+  const id = "123e4567-e89b-42d3-a456-426614174000";
+  try {
+    await testSql`INSERT INTO post_work (post_id,status) VALUES (${id},'pending')`;
+    const result = await runFakeRetry({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      GMS_TEST_MEDIA: "1",
+      GMS_TEST_DATABASE_CLOSE_FAILURE: "1",
+    });
+    expect(result.exitCode, result.stderr).toBe(1);
+    expect(result.stderr).toContain("重试 Run 已记录");
+    expect(result.stderr).toContain("已保存 1，失败 0，未处理 0");
+    expect(result.stderr).toContain(
+      "数据库关闭失败：simulated database close failure",
+    );
+    expect(result.stderr).not.toContain("fixture-token");
+    expect(result.stderr).not.toContain(databaseEnv.GROK_DB_PASSWORD);
+    const [run] = await testSql<{ outcome: string; summary: unknown }[]>`
+      SELECT outcome,summary FROM runs WHERE command='retry'`;
+    expect(run).toEqual({
+      outcome: "succeeded",
+      summary: { saved: 1, failed: 0, unprocessed: 0 },
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("retry CLI reports only confirmed progress after a save commit loses its receipt", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-unknown-save-"));
+  const id = "123e4567-e89b-42d3-a456-426614174000";
+  try {
+    await testSql`INSERT INTO post_work (post_id,status) VALUES (${id},'pending')`;
+    const result = await runFakeRetry({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      GMS_TEST_MEDIA: "1",
+      GMS_TEST_LOSE_SAVE_RECEIPT: "1",
+    });
+    expect(result.exitCode, result.stderr).toBe(1);
+    expect(result.stderr).toContain("重试结果未知；未确认 Run 记账");
+    expect(result.stderr).toContain(
+      "已确认处理：已保存 0，失败 0；剩余 1 项结果未确认",
+    );
+    expect(result.stderr).not.toContain("未处理 1");
+    const [run] = await testSql<
+      { outcome: string | null; summary: unknown }[]
+    >`SELECT outcome,summary FROM runs WHERE command='retry'`;
+    expect(run).toEqual({ outcome: null, summary: null });
+    const [work] = await testSql<{ status: string }[]>`
+      SELECT status FROM post_work WHERE post_id=${id}`;
+    expect(work?.status).toBe("saved");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 async function runFakeRetry(env: Record<string, string>) {
   return collectCli(
     Bun.spawn(
@@ -900,6 +968,12 @@ async function runFakeRetry(env: Record<string, string>) {
         "--no-env-file",
         "--preload",
         "./tests/helpers/fake-save-browser.ts",
+        ...(env.GMS_TEST_DATABASE_CLOSE_FAILURE === "1"
+          ? ["--preload", "./tests/helpers/fail-retry-db-close.ts"]
+          : []),
+        ...(env.GMS_TEST_LOSE_SAVE_RECEIPT === "1"
+          ? ["--preload", "./tests/helpers/lose-save-receipt.ts"]
+          : []),
         "src/cli.ts",
         "retry",
       ],
@@ -998,6 +1072,7 @@ test("nonempty retry rejects missing save configuration before creating a Run", 
   const result = await runCli(databaseEnv, ["retry"]);
   expect(result.exitCode).toBe(2);
   expect(result.stderr).toContain("GROK_ARCHIVE_DIR");
+  expect(result.stderr).toContain("已保存 0，失败 0，未处理 1");
   const [run] = await testSql<
     { id: string }[]
   >`SELECT id FROM runs WHERE command='retry'`;
