@@ -1,5 +1,12 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  open,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -142,6 +149,9 @@ test("S1 explicit save rereads a saved Post and reuses a verified version", asyn
     undefined,
     connect,
   );
+  const [firstWork] = await testSql<{ last_run_id: string }[]>`
+    SELECT last_run_id::text FROM post_work WHERE post_id = ${postId}
+  `;
   const second = await saveSelectedPost(
     config,
     postId,
@@ -159,6 +169,11 @@ test("S1 explicit save rereads a saved Post and reuses a verified version", asyn
       (SELECT count(*)::integer FROM media_versions) AS versions
   `;
   expect(counts).toEqual({ runs: 2, versions: 1 });
+  const [latest] = await testSql<{ last_run_id: string }[]>`
+    SELECT last_run_id::text FROM post_work WHERE post_id = ${postId}
+  `;
+  expect(latest?.last_run_id).toBeTruthy();
+  expect(latest?.last_run_id).not.toBe(firstWork?.last_run_id);
   expectedBytes += 1;
   const conflicting = await saveSelectedPost(
     config,
@@ -254,6 +269,94 @@ test.each(["missing", "corrupt"] as const)(
     expect(counts?.versions).toBe(1);
   },
 );
+
+test("S1 saved file access failure stops before download and preserves work", async () => {
+  const config = await setup();
+  let downloads = 0;
+  const connect = async () => ({
+    getPostDetail: async () => ({
+      kind: "post" as const,
+      selection: {
+        assetId: postId,
+        key: "https://assets.grok.com/image.png",
+        mimeType: "image/png",
+        quality: "image" as const,
+        expectedBytes: png.length,
+      },
+    }),
+    downloadMedia: async (
+      _selection: unknown,
+      onResponse: (response: {
+        status: number;
+        contentType: string;
+        contentLength: string;
+        contentEncoding: string;
+      }) => Promise<void>,
+      onChunk: (chunk: Uint8Array) => Promise<void>,
+    ) => {
+      downloads += 1;
+      await onResponse({
+        status: 200,
+        contentType: "image/png",
+        contentLength: String(png.length),
+        contentEncoding: "identity",
+      });
+      await onChunk(png);
+    },
+    close: async () => {},
+  });
+  expect(
+    (
+      await saveSelectedPost(
+        config,
+        postId,
+        new AbortController().signal,
+        undefined,
+        connect,
+      )
+    ).status,
+  ).toBe("ok");
+  const [before] = await testSql<
+    {
+      status: string;
+      last_run_id: string;
+      saved_media_version_id: string;
+      relative_path: string;
+    }[]
+  >`
+    SELECT w.status, w.last_run_id::text, w.saved_media_version_id::text, v.relative_path
+    FROM post_work w JOIN media_versions v ON v.id = w.saved_media_version_id
+    WHERE w.post_id = ${postId}
+  `;
+  if (!before) throw new Error("缺少首次保存事实");
+  const target = join(config.archiveRoot, before.relative_path);
+  await chmod(target, 0);
+  try {
+    const second = await saveSelectedPost(
+      config,
+      postId,
+      new AbortController().signal,
+      undefined,
+      connect,
+    );
+    expect(second.status).toBe("failed");
+    expect(second.message).toContain("归档文件");
+    expect(downloads).toBe(1);
+    const [after] = await testSql<
+      { status: string; last_run_id: string; saved_media_version_id: string }[]
+    >`
+      SELECT status, last_run_id::text, saved_media_version_id::text
+      FROM post_work WHERE post_id = ${postId}
+    `;
+    expect(after).toEqual({
+      status: before.status,
+      last_run_id: before.last_run_id,
+      saved_media_version_id: before.saved_media_version_id,
+    });
+  } finally {
+    await chmod(target, 0o600);
+  }
+});
 
 test("S1 explicit save checks only the current archive root", async () => {
   const config = await setup();

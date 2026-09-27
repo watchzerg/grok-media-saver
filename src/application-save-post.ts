@@ -28,6 +28,7 @@ import {
   readSavedVersion,
   readWork,
   recordPublishIntent,
+  recordReusedVersion,
   settleIntent,
   startWork,
 } from "./store/save-work";
@@ -142,6 +143,8 @@ export async function savePost(
           write(() => failUnreadableDetail(activeSession, id, run)),
         readSavedVersion: (id, version) =>
           readSavedVersion(activeSession, id, version),
+        recordReusedVersion: (id, run, version) =>
+          write(() => recordReusedVersion(activeSession, id, run, version)),
         markFileNotReusable: (id, run) =>
           write(() => markFileNotReusable(activeSession, id, run)),
         markNeedsDownload: (id, run, selection) =>

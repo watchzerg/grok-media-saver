@@ -148,6 +148,22 @@ export async function readSavedVersion(
   return version;
 }
 
+export async function recordReusedVersion(
+  session: ReservedSQL,
+  postId: string,
+  runId: string,
+  versionId: string,
+): Promise<void> {
+  const updated = await session<{ post_id: string }[]>`
+    UPDATE post_work SET last_run_id = ${runId}::uuid, last_error = NULL
+    WHERE post_id = ${postId} AND status = 'saved'
+      AND saved_media_version_id = ${versionId}::uuid
+    RETURNING post_id
+  `;
+  if (updated.length !== 1)
+    throw new KnownSaveFailure("Post 工作在复用前发生变化。");
+}
+
 export async function markFileNotReusable(
   session: ReservedSQL,
   postId: string,

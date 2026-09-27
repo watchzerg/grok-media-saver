@@ -24,6 +24,11 @@ type Store = {
   ): Promise<
     { relativePath: string; byteCount: string; sha256: string } | undefined
   >;
+  recordReusedVersion(
+    postId: string,
+    runId: string,
+    versionId: string,
+  ): Promise<void>;
   markFileNotReusable(postId: string, runId: string): Promise<void>;
   markNeedsDownload(
     postId: string,
@@ -179,7 +184,13 @@ export async function archivePost({
           : { status: "mismatch" as const };
       onStage?.("已核验保存文件");
       if (signal.aborted) throw new Error("保存已停止。");
+      if (check.status === "failed") throw new Error(check.reason);
       if (check.status === "ok") {
+        await store.recordReusedVersion(
+          postId,
+          runId,
+          work.savedMediaVersionId,
+        );
         result.status = "ok";
         result.message = saved
           ? "发布意图已结清，当前来源匹配；Post 保存完成。"
