@@ -161,6 +161,7 @@ async function runBatch(
   let runTerminalWriteAcknowledged = false;
   let runWriteUnknown = false;
   let invalidConfig = false;
+  let saveConfig: SaveConfig | undefined;
   const counts = { saved: 0, failed: 0, unprocessed: 0 };
   let countsKnown = false;
   const postErrors: string[] = [];
@@ -171,6 +172,15 @@ async function runBatch(
   };
 
   try {
+    if (command === "save-first-page" && !signal?.aborted) {
+      try {
+        saveConfig = prepareSave?.();
+        if (!saveConfig) throw new Error(`${label}缺少保存配置。`);
+      } catch (error) {
+        invalidConfig = true;
+        throw error;
+      }
+    }
     if (signal?.aborted) {
       result = {
         status: "cancelled",
@@ -248,8 +258,7 @@ async function runBatch(
             countsKnown = true;
           }
           await assertExecutorLock(session);
-          let saveConfig: SaveConfig | undefined;
-          if (command === "save-first-page" || targets.length) {
+          if (command === "retry" && targets.length) {
             try {
               saveConfig = prepareSave?.();
               if (!saveConfig) throw new Error(`${label}缺少保存配置。`);
@@ -321,6 +330,7 @@ async function runBatch(
               let stopReason = "";
               if (command === "save-first-page" && !signal?.aborted) {
                 if (!saveConfig) throw new Error("单页保存缺少保存配置。");
+                const pageSaveConfig = saveConfig;
                 onStage?.("读取 Saved 第一页");
                 const page = await inspectFirstPage({
                   signal,
@@ -330,7 +340,7 @@ async function runBatch(
                     connectPage ??
                     ((connectSignal) =>
                       connectBrowserSession(
-                        saveConfig.savedPageUrl,
+                        pageSaveConfig.savedPageUrl,
                         scheduler.requestStarted,
                         connectSignal,
                       )),
@@ -351,6 +361,7 @@ async function runBatch(
               }
               if (targets.length && !stopReason && !signal?.aborted) {
                 if (!saveConfig) throw new Error(`${label}缺少保存配置。`);
+                const postSaveConfig = saveConfig;
                 for (const target of targets) {
                   if (signal?.aborted) break;
                   await assertExecutorLock(session);
@@ -371,7 +382,7 @@ async function runBatch(
                           connect ??
                           ((connectSignal) =>
                             connectBrowserSession(
-                              saveConfig.savedPageUrl,
+                              postSaveConfig.savedPageUrl,
                               scheduler.requestStarted,
                               connectSignal,
                             )),
@@ -413,7 +424,12 @@ async function runBatch(
                     break;
                   }
                   counts.unprocessed -= 1;
-                  if (browserResult.status === "ok") counts.saved += 1;
+                  if (
+                    browserResult.status === "ok" ||
+                    (browserResult.status === "cancelled" &&
+                      browserResult.saveRecorded === true)
+                  )
+                    counts.saved += 1;
                   else {
                     counts.failed += 1;
                     postErrors.push(

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -81,6 +81,89 @@ test("S2 save first-page completes an empty page once", async () => {
       outcome: "succeeded",
       summary: { saved: 0, failed: 0, unprocessed: 0 },
     });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("S2 save first-page rejects invalid save config before changing an open Run", async () => {
+  await reset();
+  const legacyId = crypto.randomUUID();
+  await testSql`INSERT INTO runs (id, command, started_at) VALUES (${legacyId}::uuid, 'save-post', now())`;
+  const result = await run({
+    ...databaseEnv,
+    GROK_ARCHIVE_DIR: "/tmp/archive",
+  });
+  expect(result.exitCode).toBe(2);
+  expect(result.stderr).toContain("PLAYWRIGHT_MCP_EXTENSION_TOKEN");
+  const runs = await testSql<
+    { id: string; outcome: string | null; finished_at: Date | null }[]
+  >`SELECT id::text AS id, outcome, finished_at FROM runs`;
+  expect(runs).toEqual([{ id: legacyId, outcome: null, finished_at: null }]);
+});
+
+test("S1 stop after settling an old publication counts its saved fact", async () => {
+  await reset();
+  const root = await mkdtemp(join(tmpdir(), "gms-page-settle-stop-"));
+  const first = ids[0] as string;
+  const second = ids[1] as string;
+  const bytes = Buffer.from(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489",
+    "hex",
+  );
+  const digest = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
+  const relative = `${first}/${digest}.png`;
+  const tempName = ".page-recover.part";
+  const controller = new AbortController();
+  try {
+    await mkdir(join(root, first));
+    await writeFile(join(root, first, tempName), bytes);
+    await testSql`
+      INSERT INTO post_work (post_id,status,selected_key,quality,mime_type,
+        publish_temp_name,publish_relative_path,publish_expected_bytes,publish_sha256)
+      VALUES (${first},'finalizing','https://assets.grok.com/source.png','image','image/png',
+        ${tempName},${relative},${bytes.length},${digest})`;
+    const env = {
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture",
+      GROK_API_INTERVAL_MIN_SECONDS: "0",
+      GROK_API_INTERVAL_MAX_SECONDS: "0",
+    };
+    const result = await saveFirstPage(
+      readDatabaseConfig(env),
+      undefined,
+      controller.signal,
+      () => readSaveConfig(env),
+      async () => {
+        throw new Error("stop should prevent a detail request");
+      },
+      (stage) => {
+        if (stage === "保存结果已提交") controller.abort();
+      },
+      async () => ({
+        getFirstPage: async () => ({
+          kind: "page",
+          assets: [first, second].map((assetId) => ({
+            assetId,
+            mimeType: "image/png",
+          })),
+          hasNextPage: false,
+        }),
+        close: async () => {},
+      }),
+    );
+    expect(result.status).toBe("cancelled");
+    expect(result.message).toContain("已保存 1，失败 0，未处理 1");
+    const [run] = await testSql<{ outcome: string; summary: unknown }[]>`
+      SELECT outcome, summary FROM runs WHERE command='save-first-page'`;
+    expect(run).toEqual({
+      outcome: "stopped",
+      summary: { saved: 1, failed: 0, unprocessed: 1 },
+    });
+    const works = await testSql<{ post_id: string; status: string }[]>`
+      SELECT post_id, status FROM post_work ORDER BY post_id`;
+    expect(works).toEqual([{ post_id: first, status: "saved" }]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
