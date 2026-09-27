@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import {
   checkProjectDatabase,
   initializeProjectDatabase,
+  readProjectStatus,
 } from "../../src/application-runtime";
 import { readDatabaseConfig } from "../../src/config";
 import { databaseEnv, testSql } from "../helpers/postgres";
@@ -320,6 +321,20 @@ test("status reports saved run summary and fails safely when the database is una
   expect(unavailable.exitCode).toBe(1);
   expect(unavailable.stderr).toContain("状态查询失败");
   expect(unavailable.stderr).not.toContain("status-secret");
+});
+
+test("status reports a database close failure after reading the status", async () => {
+  const result = await readProjectStatus(
+    readDatabaseConfig(databaseEnv),
+    async (sql) => {
+      await sql.close();
+      throw new Error("受控关闭超时");
+    },
+  );
+
+  expect(result.status).toBe("failed");
+  expect(result.message).toContain("状态查询已完成");
+  expect(result.cleanupErrors).toContain("数据库关闭失败：受控关闭超时");
 });
 
 async function readPersistedFacts() {
