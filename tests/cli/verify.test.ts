@@ -3,6 +3,7 @@ import {
   chmod,
   mkdir,
   mkdtemp,
+  open,
   rm,
   symlink,
   writeFile,
@@ -14,7 +15,6 @@ import {
   verifySavedPost,
 } from "../../src/application-runtime";
 import { readDatabaseConfig, readVerifyConfig } from "../../src/config";
-import { checkArchiveFile } from "../../src/files/verify";
 import { databaseEnv, testSql } from "../helpers/postgres";
 
 const postId = "123e4567-e89b-42d3-a456-426614174000";
@@ -164,21 +164,32 @@ test("verify retains its primary failure when database close also fails", async 
 test("verify reports an archive file close failure", async () => {
   const archiveRoot = await mkdtemp(join(tmpdir(), "gms-verify-close-file-"));
   const relativePath = `${postId}/valid.bin`;
+  const filePath = join(archiveRoot, relativePath);
   await mkdir(join(archiveRoot, postId));
-  await writeFile(join(archiveRoot, relativePath), contents);
+  await writeFile(filePath, "short");
+  await seedVersion(relativePath);
+  const file = await open(filePath, "r");
+  const prototype = Object.getPrototypeOf(file) as {
+    close: (this: typeof file) => Promise<void>;
+  };
+  const originalClose = prototype.close;
+  await file.close();
   try {
-    const result = await checkArchiveFile(
-      archiveRoot,
-      relativePath,
-      contents.length,
-      digest,
-      async (file) => {
-        await file.close();
-        throw new Error("simulated file close failure");
-      },
+    const before = await readPersistedFacts();
+    prototype.close = async function (this: typeof file) {
+      await originalClose.call(this);
+      throw new Error("simulated file close failure");
+    };
+    const result = await verifySavedPost(
+      readVerifyConfig({ ...databaseEnv, GROK_ARCHIVE_DIR: archiveRoot }),
+      postId,
     );
-    expect(result).toEqual({ status: "failed", reason: "文件关闭失败。" });
+    expect(result.status).toBe("failed");
+    expect(result.message).toContain("文件关闭失败");
+    expect(result.cleanupErrors).toEqual([]);
+    expect(await readPersistedFacts()).toEqual(before);
   } finally {
+    prototype.close = originalClose;
     await rm(archiveRoot, { recursive: true, force: true });
   }
 });

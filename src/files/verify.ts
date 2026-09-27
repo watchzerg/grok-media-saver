@@ -11,16 +11,11 @@ export type ArchiveCheck =
   | { status: "mismatch" }
   | { status: "failed"; reason: string };
 
-export type ArchiveFileCloser = (
-  file: Awaited<ReturnType<typeof open>>,
-) => Promise<void>;
-
 export async function checkArchiveFile(
   archiveRoot: string,
   relativePath: string,
   expectedBytes: number,
   expectedSha256: string,
-  closeFile: ArchiveFileCloser = (file) => file.close(),
 ): Promise<ArchiveCheck> {
   if (isAbsolute(relativePath))
     return { status: "failed", reason: "保存路径不是相对路径。" };
@@ -98,7 +93,7 @@ export async function checkArchiveFile(
     result = { status: "failed", reason: "读取归档文件失败。" };
   }
   try {
-    await closeFile(file);
+    await file.close();
   } catch {
     return result.status === "failed"
       ? { status: "failed", reason: `${result.reason} 文件关闭失败。` }
