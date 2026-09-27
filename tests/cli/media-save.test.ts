@@ -1,5 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { mkdtemp, open, rm } from "node:fs/promises";
+import { mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -93,6 +93,241 @@ test("S1 saves a complete selected image through the download capability", async
     { status: string }[]
   >`SELECT status FROM post_work WHERE post_id = ${postId}`;
   expect(work?.status).toBe("saved");
+});
+
+test("S1 explicit save rereads a saved Post and reuses a verified version", async () => {
+  const config = await setup();
+  let details = 0;
+  let downloads = 0;
+  let expectedBytes = png.length;
+  const connect = async () => ({
+    getPostDetail: async () => {
+      details += 1;
+      return {
+        kind: "post" as const,
+        selection: {
+          assetId: postId,
+          key: "https://assets.grok.com/image.png",
+          mimeType: "image/png",
+          quality: "image" as const,
+          expectedBytes,
+        },
+      };
+    },
+    downloadMedia: async (
+      _selection: unknown,
+      onResponse: (response: {
+        status: number;
+        contentType: string;
+        contentLength: string;
+        contentEncoding: string;
+      }) => Promise<void>,
+      onChunk: (chunk: Uint8Array) => Promise<void>,
+    ) => {
+      downloads += 1;
+      await onResponse({
+        status: 200,
+        contentType: "image/png",
+        contentLength: String(png.length),
+        contentEncoding: "identity",
+      });
+      await onChunk(png);
+    },
+    close: async () => {},
+  });
+  const first = await saveSelectedPost(
+    config,
+    postId,
+    new AbortController().signal,
+    undefined,
+    connect,
+  );
+  const second = await saveSelectedPost(
+    config,
+    postId,
+    new AbortController().signal,
+    undefined,
+    connect,
+  );
+  expect(first.status).toBe("ok");
+  expect(second.status).toBe("ok");
+  expect(second.message).toContain("复用");
+  expect(details).toBe(2);
+  expect(downloads).toBe(1);
+  const [counts] = await testSql<{ runs: number; versions: number }[]>`
+    SELECT (SELECT count(*)::integer FROM runs) AS runs,
+      (SELECT count(*)::integer FROM media_versions) AS versions
+  `;
+  expect(counts).toEqual({ runs: 2, versions: 1 });
+  expectedBytes += 1;
+  const conflicting = await saveSelectedPost(
+    config,
+    postId,
+    new AbortController().signal,
+    undefined,
+    connect,
+  );
+  expect(conflicting.status).toBe("failed");
+  expect(details).toBeGreaterThan(2);
+  expect(downloads).toBeGreaterThan(1);
+  const [preserved] = await testSql<
+    { versions: number; saved_version: string }[]
+  >`
+    SELECT (SELECT count(*)::integer FROM media_versions) AS versions,
+      saved_media_version_id::text AS saved_version
+    FROM post_work WHERE post_id = ${postId}
+  `;
+  expect(preserved?.versions).toBe(1);
+  expect(preserved?.saved_version).toBeTruthy();
+});
+
+test.each(["missing", "corrupt"] as const)(
+  "S1 saved file %s follows download and preserves the existing version",
+  async (condition) => {
+    const config = await setup();
+    let downloads = 0;
+    const connect = async () => ({
+      getPostDetail: async () => ({
+        kind: "post" as const,
+        selection: {
+          assetId: postId,
+          key: "https://assets.grok.com/image.png",
+          mimeType: "image/png",
+          quality: "image" as const,
+          expectedBytes: png.length,
+        },
+      }),
+      downloadMedia: async (
+        _selection: unknown,
+        onResponse: (response: {
+          status: number;
+          contentType: string;
+          contentLength: string;
+          contentEncoding: string;
+        }) => Promise<void>,
+        onChunk: (chunk: Uint8Array) => Promise<void>,
+      ) => {
+        downloads += 1;
+        await onResponse({
+          status: 200,
+          contentType: "image/png",
+          contentLength: String(png.length),
+          contentEncoding: "identity",
+        });
+        await onChunk(png);
+      },
+      close: async () => {},
+    });
+    expect(
+      (
+        await saveSelectedPost(
+          config,
+          postId,
+          new AbortController().signal,
+          undefined,
+          connect,
+        )
+      ).status,
+    ).toBe("ok");
+    const [version] = await testSql<
+      { relative_path: string }[]
+    >`SELECT relative_path FROM media_versions WHERE post_id = ${postId}`;
+    if (!version) throw new Error("版本记录缺失");
+    const target = join(config.archiveRoot, version.relative_path);
+    if (condition === "missing") await rm(target);
+    else await writeFile(target, Buffer.alloc(png.length, 0));
+    const second = await saveSelectedPost(
+      config,
+      postId,
+      new AbortController().signal,
+      undefined,
+      connect,
+    );
+    expect(downloads).toBe(2);
+    expect(second.status).toBe(condition === "missing" ? "ok" : "failed");
+    expect(await readFile(target)).toEqual(
+      condition === "missing" ? png : Buffer.alloc(png.length, 0),
+    );
+    const [counts] = await testSql<
+      { versions: number }[]
+    >`SELECT count(*)::integer AS versions FROM media_versions`;
+    expect(counts?.versions).toBe(1);
+  },
+);
+
+test("S1 explicit save checks only the current archive root", async () => {
+  const config = await setup();
+  let downloads = 0;
+  const connect = async () => ({
+    getPostDetail: async () => ({
+      kind: "post" as const,
+      selection: {
+        assetId: postId,
+        key: "https://assets.grok.com/image.png",
+        mimeType: "image/png",
+        quality: "image" as const,
+        expectedBytes: png.length,
+      },
+    }),
+    downloadMedia: async (
+      _selection: unknown,
+      onResponse: (response: {
+        status: number;
+        contentType: string;
+        contentLength: string;
+        contentEncoding: string;
+      }) => Promise<void>,
+      onChunk: (chunk: Uint8Array) => Promise<void>,
+    ) => {
+      downloads += 1;
+      await onResponse({
+        status: 200,
+        contentType: "image/png",
+        contentLength: String(png.length),
+        contentEncoding: "identity",
+      });
+      await onChunk(png);
+    },
+    close: async () => {},
+  });
+  expect(
+    (
+      await saveSelectedPost(
+        config,
+        postId,
+        new AbortController().signal,
+        undefined,
+        connect,
+      )
+    ).status,
+  ).toBe("ok");
+  const [version] = await testSql<
+    { relative_path: string }[]
+  >`SELECT relative_path FROM media_versions WHERE post_id = ${postId}`;
+  if (!version) throw new Error("版本记录缺失");
+  const otherRoot = await mkdtemp(join(tmpdir(), "gms-other-root-"));
+  try {
+    const movedConfig = { ...config, archiveRoot: otherRoot };
+    const result = await saveSelectedPost(
+      movedConfig,
+      postId,
+      new AbortController().signal,
+      undefined,
+      connect,
+    );
+    expect(result.status, result.message).toBe("ok");
+    expect(downloads).toBe(2);
+    expect(
+      await readFile(join(config.archiveRoot, version.relative_path)),
+    ).toEqual(png);
+    expect(await readFile(join(otherRoot, version.relative_path))).toEqual(png);
+    const [counts] = await testSql<
+      { versions: number }[]
+    >`SELECT count(*)::integer AS versions FROM media_versions`;
+    expect(counts?.versions).toBe(1);
+  } finally {
+    await rm(otherRoot, { recursive: true, force: true });
+  }
 });
 
 test("S1 以所选 1080p MP4 响应长度保存并核验版本", async () => {
@@ -803,3 +1038,77 @@ test.each([
     else expect(stderr).toContain("停止");
   },
 );
+
+test("S2 real CLI saves again, reuses the version, then reports detail failure without losing it", async () => {
+  const config = await setup();
+  const requestTimes = join(config.archiveRoot, "request-times");
+  const run = async (unavailable = false) => {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "--no-env-file",
+        "--preload",
+        "./tests/helpers/fake-save-browser.ts",
+        "src/cli.ts",
+        "save",
+        "post",
+        postId,
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...databaseEnv,
+          GROK_ARCHIVE_DIR: config.archiveRoot,
+          PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+          GROK_API_INTERVAL_MIN_SECONDS: "0",
+          GROK_API_INTERVAL_MAX_SECONDS: "0",
+          GMS_TEST_MEDIA: "1",
+          GMS_TEST_UNAVAILABLE: unavailable ? "1" : "0",
+          GMS_TEST_REQUEST_TIMES: requestTimes,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(`${stdout}${stderr}`).not.toContain("fixture-token");
+    return { stdout, stderr, code };
+  };
+  const first = await run();
+  expect(first.code, first.stderr).toBe(0);
+  const [version] = await testSql<
+    { relative_path: string }[]
+  >`SELECT relative_path FROM media_versions WHERE post_id = ${postId}`;
+  if (!version) throw new Error("版本记录缺失");
+  const original = await readFile(
+    join(config.archiveRoot, version.relative_path),
+  );
+  const second = await run();
+  expect(second.code, second.stderr).toBe(0);
+  expect(second.stdout).toContain("已复用保存文件");
+  const failed = await run(true);
+  expect(failed.code).toBe(1);
+  expect(failed.stderr).toContain("详情不可读取");
+  expect(
+    await readFile(join(config.archiveRoot, version.relative_path)),
+  ).toEqual(original);
+  expect(
+    (await readFile(requestTimes, "utf8")).trim().split("\n"),
+  ).toHaveLength(3);
+  const [counts] = await testSql<{ runs: number; versions: number }[]>`
+    SELECT (SELECT count(*)::integer FROM runs) AS runs,
+      (SELECT count(*)::integer FROM media_versions) AS versions
+  `;
+  expect(counts).toEqual({ runs: 3, versions: 1 });
+  const [work] = await testSql<
+    { status: string; saved_media_version_id: string }[]
+  >`
+    SELECT status, saved_media_version_id::text FROM post_work WHERE post_id = ${postId}
+  `;
+  expect(work?.status).toBe("failed");
+  expect(work?.saved_media_version_id).toBeTruthy();
+});

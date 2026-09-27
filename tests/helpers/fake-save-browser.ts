@@ -19,9 +19,11 @@ mock.module("../../src/browser/session.ts", () => ({
           status:
             process.env.GMS_TEST_BLOCKED === "1"
               ? 429
-              : process.env.GMS_TEST_RETRY_DETAIL === "1" && attempts === 1
-                ? 503
-                : 200,
+              : process.env.GMS_TEST_UNAVAILABLE === "1"
+                ? 404
+                : process.env.GMS_TEST_RETRY_DETAIL === "1" && attempts === 1
+                  ? 503
+                  : 200,
           contentType: "application/json",
           finalPath: "/rest/app-chat/conversations/fixture",
           retryAfter: process.env.GMS_TEST_BLOCKED === "1" ? "60" : undefined,
