@@ -23,7 +23,7 @@ import {
   releaseExecutorLock,
   tryAcquireExecutorLock,
 } from "./store/executor";
-import { KnownSaveFailure } from "./store/save-work";
+import { KnownSaveConflict, KnownSaveFailure } from "./store/save-work";
 import { initializeSchema, verifySchema } from "./store/schema";
 
 export type DatabaseResult = {
@@ -221,6 +221,7 @@ export async function retryUnfinishedPosts(
             const stopped = await finishStoppedRun(
               session,
               runId,
+              counts,
               (unknown, finished) => {
                 runWriteUnknown = unknown;
                 if (finished) runTerminalWriteAcknowledged = true;
@@ -242,6 +243,7 @@ export async function retryUnfinishedPosts(
               const stopped = await finishStoppedRun(
                 session,
                 runId,
+                counts,
                 (unknown, finished) => {
                   runWriteUnknown = unknown;
                   if (finished) runTerminalWriteAcknowledged = true;
@@ -311,7 +313,8 @@ export async function retryUnfinishedPosts(
                       !signal?.aborted &&
                       result.cleanupErrors.length === 0 &&
                       (error instanceof RetryableRequestError ||
-                        error instanceof PublishConflictError)
+                        error instanceof PublishConflictError ||
+                        error instanceof KnownSaveConflict)
                     ) {
                       counts.unprocessed -= 1;
                       counts.failed += 1;
@@ -393,6 +396,7 @@ export async function retryUnfinishedPosts(
           const stopped = await finishStoppedRun(
             session,
             runId,
+            counts,
             (unknown, finished) => {
               runWriteUnknown = unknown;
               if (finished) runTerminalWriteAcknowledged = true;
@@ -487,12 +491,14 @@ async function finishStoppedRun(
     ReturnType<NonNullable<ReturnType<typeof connectDatabase>>["reserve"]>
   >,
   runId: string,
+  counts: { saved: number; failed: number; unprocessed: number },
   writeState: (unknown: boolean, acknowledged?: boolean) => void,
 ): Promise<boolean> {
   await assertExecutorLock(session);
   writeState(true);
   const updated = await session<{ id: string }[]>`
-    UPDATE runs SET finished_at = now(), outcome = 'stopped', summary = NULL
+    UPDATE runs SET finished_at = now(), outcome = 'stopped',
+      summary = ${counts}::jsonb
     WHERE id = ${runId}::uuid AND finished_at IS NULL
     RETURNING id::text AS id
   `;

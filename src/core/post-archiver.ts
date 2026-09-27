@@ -126,8 +126,12 @@ export async function archivePost({
         detail = await getDetail(signal);
       } catch (error) {
         if (signal.aborted) throw new Error("保存已停止。");
-        if (!(error instanceof RetryableRequestError) || attempt >= 2)
+        if (error instanceof RetryableRequestError && attempt >= 2) {
+          await store.assertLock();
+          await store.failUnreadableDetail(postId, runId);
           throw error;
+        }
+        if (!(error instanceof RetryableRequestError)) throw error;
         await waitBeforeRetry(signal);
         await store.assertLock();
         continue;

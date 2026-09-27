@@ -144,8 +144,9 @@ export async function publishIntent(
       work.sha256 as string,
     );
     if (temp.status === "missing") return "missing";
+    if (temp.status === "failed") throw new Error(temp.reason);
     if (temp.status !== "ok")
-      throw new Error("临时文件与发布意图不符，现场已保留。");
+      throw new PublishConflictError("临时文件与发布意图不符，现场已保留。");
     if (signal.aborted) throw new Error("保存已停止；发布意图已保留。");
     onStage?.("发布文件");
     publicationStarted = true;
