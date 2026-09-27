@@ -98,7 +98,13 @@ test("verify reports current-directory file anomalies without changing facts", a
       "missing-target.bin",
       join(archiveRoot, postId, "dangling-symlink"),
     );
-    await writeFile(validFile, "different bytes");
+    const changedContents = Buffer.from(contents);
+    changedContents[0] ^= 1;
+    expect(changedContents.length).toBe(contents.length);
+    expect(
+      new Bun.CryptoHasher("sha256").update(changedContents).digest("hex"),
+    ).not.toBe(digest);
+    await writeFile(validFile, changedContents);
 
     for (const [name, relativePath, expectedText] of cases) {
       await setVersionPath(relativePath);
@@ -112,6 +118,9 @@ test("verify reports current-directory file anomalies without changing facts", a
       expect(result.stdout).toContain(expectedText);
       expect(result.stderr).toBe("");
       expect(after).toEqual(before);
+      if (name === "changed bytes") {
+        expect(await Bun.file(validFile).bytes()).toEqual(changedContents);
+      }
     }
 
     await setVersionPath(validPath);
