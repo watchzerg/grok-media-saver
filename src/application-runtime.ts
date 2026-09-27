@@ -12,6 +12,17 @@ export type DatabaseResult = {
   cleanupErrors: string[];
 };
 
+export type ProjectStatusResult = DatabaseResult & {
+  latestRun: {
+    command: string;
+    startedAt: string;
+    finishedAt: string | null;
+    outcome: string | null;
+    summary: Record<string, unknown> | null;
+  } | null;
+  unfinishedPosts: { postId: string; status: string }[];
+};
+
 export type DatabaseCloser = (
   sql: SQL,
   timeoutSeconds: number,
@@ -46,6 +57,65 @@ export function checkProjectDatabase(
     },
     close,
   );
+}
+
+export function readProjectStatus(
+  config: DatabaseConfig,
+  close: DatabaseCloser = closeDatabase,
+): Promise<ProjectStatusResult> {
+  return withStatusDatabase(config, close);
+}
+
+async function withStatusDatabase(
+  config: DatabaseConfig,
+  close: DatabaseCloser,
+): Promise<ProjectStatusResult> {
+  let sql: ReturnType<typeof connectDatabase> | undefined;
+  let result: ProjectStatusResult = {
+    status: "failed",
+    message: "状态查询失败。",
+    cleanupErrors: [],
+    latestRun: null,
+    unfinishedPosts: [],
+  };
+  try {
+    sql = connectDatabase(config);
+    await verifySchema(sql);
+    const [latestRun] = await sql<ProjectStatusResult["latestRun"][]>`
+      SELECT command, started_at::text AS "startedAt",
+        finished_at::text AS "finishedAt", outcome, summary
+      FROM runs
+      ORDER BY started_at DESC, id DESC
+      LIMIT 1
+    `;
+    const unfinishedPosts = await sql<ProjectStatusResult["unfinishedPosts"]>`
+      SELECT post_id AS "postId", status
+      FROM post_work
+      WHERE status <> 'saved'
+      ORDER BY post_id
+    `;
+    result = {
+      status: "ok",
+      message: "状态查询完成。",
+      cleanupErrors: [],
+      latestRun: latestRun ?? null,
+      unfinishedPosts,
+    };
+  } catch (error) {
+    result.message = `状态查询失败：${safeDatabaseError(error, config)}`;
+  }
+  if (sql) {
+    try {
+      await close(sql, 5);
+    } catch (error) {
+      const detail = safeDatabaseError(error, config);
+      result.cleanupErrors.push(`数据库关闭失败：${detail}`);
+      if (result.status === "ok")
+        result.message = "状态查询已完成，但数据库连接关闭失败。";
+      result.status = "failed";
+    }
+  }
+  return result;
 }
 
 async function withDatabase(

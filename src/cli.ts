@@ -2,6 +2,7 @@ import {
   initializeProjectDatabase,
   inspectSavedFirstPage,
   inspectSavedPost,
+  readProjectStatus,
 } from "./application-runtime";
 import {
   type DatabaseConfig,
@@ -12,7 +13,7 @@ import {
 import { normalizePostId } from "./grok/adapter";
 
 const usage =
-  "用法：grok-media-saver db init | inspect first-page | inspect post <Post ID>";
+  "用法：grok-media-saver db init | status | inspect first-page | inspect post <Post ID>";
 
 type CliDependencies = {
   initializeProjectDatabase: typeof initializeProjectDatabase;
@@ -27,6 +28,7 @@ export async function main(
     args.length === 2 && args[0] === "inspect" && args[1] === "first-page";
   const isDatabaseInit =
     args.length === 2 && args[0] === "db" && args[1] === "init";
+  const isStatus = args.length === 1 && args[0] === "status";
   const isPost =
     args.length === 3 && args[0] === "inspect" && args[1] === "post";
   if (isDatabaseInit) {
@@ -41,6 +43,42 @@ export async function main(
     console.log(result.status === "ok" ? result.message : "数据库初始化失败。");
     for (const error of result.cleanupErrors) console.error(error);
     if (result.status === "failed") console.error(result.message);
+    return result.status === "ok" ? 0 : 1;
+  }
+  if (isStatus) {
+    let config: DatabaseConfig;
+    try {
+      config = readDatabaseConfig(env);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "配置无效。");
+      return 2;
+    }
+    const result = await readProjectStatus(config);
+    if (result.latestRun) {
+      const latest = result.latestRun;
+      console.log(`最近 Run：${latest.command}，开始于 ${latest.startedAt}。`);
+      if (!latest.finishedAt) {
+        console.log("结果：可能仍在运行或已中断；结束时间和数量未知。");
+      } else {
+        console.log(
+          `结束于 ${latest.finishedAt}；结果：${latest.outcome ?? "未知"}。`,
+        );
+        const counts = formatRunCounts(latest.summary);
+        console.log(counts ? `摘要：${counts}。` : "Run 摘要数量未知。");
+      }
+    } else if (result.status === "ok") {
+      console.log("尚无 Run。");
+    }
+    if (result.unfinishedPosts.length === 0) {
+      if (result.status === "ok") console.log("没有未完成 Post。");
+    } else {
+      console.log(`当前未完成 Post（${result.unfinishedPosts.length}）：`);
+      for (const post of result.unfinishedPosts)
+        console.log(`  ${post.postId}  ${post.status}`);
+    }
+    if (result.status === "ok") console.log(result.message);
+    else console.error(result.message);
+    for (const error of result.cleanupErrors) console.error(error);
     return result.status === "ok" ? 0 : 1;
   }
   if (!isFirstPage && !isPost) {
@@ -92,6 +130,24 @@ export async function main(
     process.off("SIGINT", stop);
   }
   return exitCode;
+}
+
+function formatRunCounts(
+  summary: Record<string, unknown> | null,
+): string | null {
+  if (!summary) return null;
+  const labels: Record<string, string> = {
+    saved: "已保存",
+    failed: "失败",
+    unprocessed: "未处理",
+  };
+  const parts = Object.entries(labels).flatMap(([key, label]) => {
+    const value = summary[key];
+    return typeof value === "number" && Number.isFinite(value)
+      ? [`${label} ${value}`]
+      : [];
+  });
+  return parts.length > 0 ? parts.join("，") : null;
 }
 
 if (import.meta.main) {

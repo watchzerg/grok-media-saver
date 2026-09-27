@@ -33,6 +33,14 @@ mise exec -- bun src/cli.ts db init
 
 首次使用前，在 PostgreSQL 中准备独立的项目数据库，并填写 `GROK_DB_HOST`、`GROK_DB_PORT`、`GROK_DB_USER`、`GROK_DB_PASSWORD` 和 `GROK_DB_NAME`。`db init` 只需要这些 DB 配置，不需要浏览器 token 或归档目录。
 
+## 查看数据库状态
+
+`status` 只读取已初始化的项目数据库，显示最近 Run 摘要和当前未完成 Post。未正常收尾的 Run 会将数量标为未知，并提示它可能仍在运行或已中断；命令不会连接浏览器或检查归档文件。历史失败不影响状态查询成功退出。
+
+```sh
+mise exec -- bun src/cli.ts status
+```
+
 ## 只读检查指定 Post
 
 传入带连字符的 Post UUID；程序会去除首尾空白并转成小写。输出只包含媒体类型和所选画质，不输出媒体 URL 或详情响应。
