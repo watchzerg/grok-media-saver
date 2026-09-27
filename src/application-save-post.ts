@@ -78,10 +78,12 @@ export async function savePost(
     cleanupErrors: [],
   };
   const reportStopAfterSave = () => {
-    if (signal.aborted && result.status === "ok") {
-      result.status = "cancelled";
-      result.message = "保存已停止；Post 已保存。";
-    }
+    if (!signal.aborted || result.status === "cancelled") return;
+    result.message =
+      result.status === "ok"
+        ? "保存已停止；Post 已保存。"
+        : `保存已停止；${result.message}`;
+    result.status = "cancelled";
   };
   const write = async <T>(operation: () => Promise<T>): Promise<T> => {
     runWriteUnknown = true;

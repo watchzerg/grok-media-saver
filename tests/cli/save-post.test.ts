@@ -695,6 +695,61 @@ test.each([
   },
 );
 
+test.each([
+  ["blocked", "HTTP 429", "saved", "核对收尾执行器锁", "stopped"],
+  ["blocked", "HTTP 429", "saved", "Run 已收尾", "failed"],
+  ["failed", "需要下载", "pending", "核对收尾执行器锁", "stopped"],
+  ["failed", "需要下载", "pending", "Run 已收尾", "failed"],
+] as const)(
+  "stop after %s result (%s, %s) at %s preserves facts",
+  async (businessStatus, reason, workStatus, stopAt, outcome) => {
+    const config = await seed();
+    await writeFile(join(config.archiveRoot, relativePath), bytes);
+    const controller = new AbortController();
+    const result = await saveViaApplication(config, postId, {
+      connect:
+        businessStatus === "blocked"
+          ? async () => ({
+              getPostDetail: async () => ({
+                kind: "blocked" as const,
+                status: 429,
+                retryAfter: "60",
+              }),
+              close: async () => {},
+            })
+          : async () => ({
+              getPostDetail: async () =>
+                parsePostDetailResponse(postId, {
+                  status: 200,
+                  contentType: "application/json",
+                  finalPath: "/rest/app-chat/conversations/fixture",
+                  body: {
+                    assetId: postId,
+                    key: "https://assets.grok.com/changed.png",
+                    mimeType: "image/png",
+                  },
+                }),
+              close: async () => {},
+            }),
+      signal: controller.signal,
+      onStage: (stage) => {
+        if (stage === stopAt) controller.abort();
+      },
+    });
+    expect(result.status).toBe("cancelled");
+    expect(result.message).toContain(reason);
+    expect(result.saveRecorded).toBe(true);
+    const [run] = await testSql<{ outcome: string }[]>`
+      SELECT outcome FROM runs ORDER BY started_at DESC LIMIT 1
+    `;
+    expect(run?.outcome).toBe(outcome);
+    const [work] = await testSql<{ status: string }[]>`
+      SELECT status FROM post_work WHERE post_id = ${postId}
+    `;
+    expect(work?.status).toBe(workStatus);
+  },
+);
+
 test("real CLI SIGINT during Run finish exits 130 without rewriting its success", async () => {
   const config = await seed();
   await writeFile(join(config.archiveRoot, relativePath), bytes);
@@ -768,6 +823,93 @@ test("real CLI SIGINT during Run finish exits 130 without rewriting its success"
     await testSql.unsafe("DROP FUNCTION delay_run_finish()");
   }
 });
+
+test.each([
+  ["blocked", "HTTP 429", "saved"],
+  ["failed", "需要下载", "pending"],
+] as const)(
+  "real CLI SIGINT during %s Run finish exits 130 and preserves the reason",
+  async (businessStatus, reason, workStatus) => {
+    const config = await seed();
+    if (businessStatus === "blocked")
+      await writeFile(join(config.archiveRoot, relativePath), bytes);
+    await testSql.unsafe(`
+      CREATE FUNCTION delay_run_finish() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.finished_at IS NOT NULL THEN PERFORM pg_sleep(1); END IF;
+        RETURN NEW;
+      END $$
+    `);
+    await testSql.unsafe(`
+      CREATE TRIGGER delay_run_finish BEFORE UPDATE ON runs
+      FOR EACH ROW EXECUTE FUNCTION delay_run_finish()
+    `);
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "--no-env-file",
+        "--preload",
+        "./tests/helpers/fake-save-browser.ts",
+        "src/cli.ts",
+        "save",
+        "post",
+        postId,
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...databaseEnv,
+          GROK_ARCHIVE_DIR: config.archiveRoot,
+          PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+          GMS_TEST_BLOCKED: businessStatus === "blocked" ? "1" : "0",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    try {
+      const deadline = Date.now() + 5_000;
+      let sleeping = false;
+      while (Date.now() < deadline) {
+        const [activity] = await testSql<{ sleeping: boolean }[]>`
+          SELECT EXISTS (
+            SELECT 1 FROM pg_stat_activity
+            WHERE datname = current_database() AND pid <> pg_backend_pid()
+              AND state = 'active' AND wait_event = 'PgSleep'
+          ) AS sleeping
+        `;
+        if (activity?.sleeping) {
+          sleeping = true;
+          break;
+        }
+        await Bun.sleep(20);
+      }
+      expect(sleeping).toBe(true);
+      child.kill("SIGINT");
+      const [stdout, stderr, exitCode] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      expect(exitCode, `${stdout}\n${stderr}`).toBe(130);
+      expect(stderr).toContain("停止");
+      expect(stderr).toContain(reason);
+      const [run] = await testSql<{ outcome: string }[]>`
+        SELECT outcome FROM runs ORDER BY started_at DESC LIMIT 1
+      `;
+      expect(run?.outcome).toBe("failed");
+      const [work] = await testSql<{ status: string }[]>`
+        SELECT status FROM post_work WHERE post_id = ${postId}
+      `;
+      expect(work?.status).toBe(workStatus);
+    } finally {
+      child.kill();
+      await child.exited;
+      await testSql.unsafe("DROP TRIGGER delay_run_finish ON runs");
+      await testSql.unsafe("DROP FUNCTION delay_run_finish()");
+    }
+  },
+);
 
 test.each(["正式文件已发布", "提交保存结果", "保存结果已提交"])(
   "stop at %s preserves a resumable or saved fact",
@@ -1125,4 +1267,40 @@ test("real CLI reports blocked detail and known wait without clearing saved fact
     SELECT status FROM post_work WHERE post_id = ${postId}
   `;
   expect(work?.status).toBe("saved");
+});
+
+test("real CLI still exits 1 for a download needed without SIGINT", async () => {
+  const config = await seed();
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--no-env-file",
+      "--preload",
+      "./tests/helpers/fake-save-browser.ts",
+      "src/cli.ts",
+      "save",
+      "post",
+      postId,
+    ],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...databaseEnv,
+        GROK_ARCHIVE_DIR: config.archiveRoot,
+        PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [stderr, code] = await Promise.all([
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(code).toBe(1);
+  expect(stderr).toContain("需要下载");
+  const [run] = await testSql<{ outcome: string }[]>`
+    SELECT outcome FROM runs ORDER BY started_at DESC LIMIT 1
+  `;
+  expect(run?.outcome).toBe("failed");
 });
