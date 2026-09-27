@@ -1,9 +1,18 @@
-import { inspectSavedFirstPage, inspectSavedPost } from "./application-runtime";
-import { type InspectConfig, readInspectConfig } from "./config";
+import {
+  initializeProjectDatabase,
+  inspectSavedFirstPage,
+  inspectSavedPost,
+} from "./application-runtime";
+import {
+  type DatabaseConfig,
+  type InspectConfig,
+  readDatabaseConfig,
+  readInspectConfig,
+} from "./config";
 import { normalizePostId } from "./grok/adapter";
 
 const usage =
-  "用法：grok-media-saver inspect first-page | inspect post <Post ID>";
+  "用法：grok-media-saver db init | inspect first-page | inspect post <Post ID>";
 
 export async function main(
   args: string[],
@@ -11,8 +20,24 @@ export async function main(
 ): Promise<number> {
   const isFirstPage =
     args.length === 2 && args[0] === "inspect" && args[1] === "first-page";
+  const isDatabaseInit =
+    args.length === 2 && args[0] === "db" && args[1] === "init";
   const isPost =
     args.length === 3 && args[0] === "inspect" && args[1] === "post";
+  if (isDatabaseInit) {
+    let config: DatabaseConfig;
+    try {
+      config = readDatabaseConfig(env);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "配置无效。");
+      return 2;
+    }
+    const result = await initializeProjectDatabase(config);
+    console.log(result.status === "ok" ? result.message : "数据库初始化失败。");
+    for (const error of result.cleanupErrors) console.error(error);
+    if (result.status === "failed") console.error(result.message);
+    return result.status === "ok" ? 0 : 1;
+  }
   if (!isFirstPage && !isPost) {
     console.error(usage);
     return 2;

@@ -5,6 +5,34 @@ export type InspectConfig = {
   requestIntervalMaxSeconds: number;
 };
 
+export type DatabaseConfig = {
+  host: string;
+  port: number;
+  username: string;
+  password: string;
+  database: string;
+};
+
+export function readDatabaseConfig(
+  env: Record<string, string | undefined>,
+): DatabaseConfig {
+  const host = requiredValue(env.GROK_DB_HOST, "GROK_DB_HOST");
+  const username = requiredValue(env.GROK_DB_USER, "GROK_DB_USER");
+  const password = requiredValue(env.GROK_DB_PASSWORD, "GROK_DB_PASSWORD");
+  const database = requiredValue(env.GROK_DB_NAME, "GROK_DB_NAME");
+  const rawPort = env.GROK_DB_PORT?.trim() || "5432";
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65535)
+    throw new Error("GROK_DB_PORT 必须是 1 到 65535 之间的整数。");
+  return { host, port, username, password, database };
+}
+
+function requiredValue(value: string | undefined, key: string): string {
+  const normalized = value?.trim();
+  if (!normalized) throw new Error(`缺少配置 ${key}。`);
+  return normalized;
+}
+
 export function readInspectConfig(
   env: Record<string, string | undefined>,
 ): InspectConfig {

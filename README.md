@@ -11,7 +11,7 @@ just install
 just gate-full
 ```
 
-`gate-core` 覆盖 Bun 版本、TypeScript、基础 Application 测试及 Biome；`gate-full` 另运行真实 CLI 子进程测试。两者都不连接 Chrome、Extension 或 Grok。`just test` 运行 Bun 测试；`just test core` 运行 Application 与能力 seam 测试。
+`gate-core` 覆盖 Bun 版本、TypeScript、基础 Application 测试及 Biome，不启动外部服务。`gate-full` 另运行真实 CLI 子进程和隔离 Docker PostgreSQL 测试；两者都不连接 Chrome、Extension 或 Grok。`just test` 运行 Bun 测试；`just test core` 运行 Application 与能力 seam 测试。
 
 ## 只读检查 Saved 第一页
 
@@ -22,6 +22,16 @@ mise exec -- bun src/cli.ts inspect first-page
 ```
 
 命令只读取一次 Saved 第一页，不展开 Post，不建立 Run 或 Post 工作。正式连接、第一页响应、关闭连接和重新连接已完成现场验收；Saved 页的首请求为 `workspaceKind=WORKSPACE_KIND_IMAGINE_ALL`、`pageSize=40`。取消竞速、真实断连故障及清理失败仍需按[一期浏览器验收要求](docs/research/phase1-browser-session.md#尚未验证与首个切片的验收)验证。
+
+## 初始化项目数据库
+
+`db init` 只连接 `.env` 中的项目 PostgreSQL 配置，检查并创建当前 schema；它不会创建数据库、清空数据或启动浏览器。结构符合当前 schema 时可重复运行；结构不符时会报错。普通命令的 schema 检查只读，不会自动创建或迁移结构。
+
+```sh
+mise exec -- bun src/cli.ts db init
+```
+
+首次使用前，在 PostgreSQL 中准备独立的项目数据库，并填写 `GROK_DB_HOST`、`GROK_DB_PORT`、`GROK_DB_USER`、`GROK_DB_PASSWORD` 和 `GROK_DB_NAME`。`db init` 只需要这些 DB 配置，不需要浏览器 token 或归档目录。
 
 ## 只读检查指定 Post
 
