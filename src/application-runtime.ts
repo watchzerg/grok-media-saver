@@ -1,5 +1,6 @@
 import type { SQL } from "bun";
 import { inspectFirstPage, inspectPost } from "./application";
+import { type SavePostOptions, savePost } from "./application-save-post";
 import { connectBrowserSession } from "./browser/session";
 import type {
   DatabaseConfig,
@@ -9,7 +10,6 @@ import type {
 } from "./config";
 import { checkArchiveFile } from "./files/verify";
 import { createRequestScheduler } from "./grok/request-scheduler";
-import { savePost } from "./save-post";
 import { connectDatabase, safeDatabaseError } from "./store/database";
 import {
   assertExecutorLock,
@@ -602,6 +602,7 @@ export async function saveSelectedPost(
   postId: string,
   signal: AbortSignal,
   onStage?: (stage: string) => void,
+  connect?: SavePostOptions["connect"],
 ) {
   const scheduler = createRequestScheduler({
     minSeconds: config.requestIntervalMinSeconds,
@@ -610,11 +611,13 @@ export async function saveSelectedPost(
   return savePost(config, postId, {
     signal,
     onStage,
-    connect: (connectSignal) =>
-      connectBrowserSession(
-        config.savedPageUrl,
-        scheduler.requestStarted,
-        connectSignal,
-      ),
+    connect:
+      connect ??
+      ((connectSignal) =>
+        connectBrowserSession(
+          config.savedPageUrl,
+          scheduler.requestStarted,
+          connectSignal,
+        )),
   });
 }

@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   initializeProjectDatabase,
+  saveSelectedPost,
   verifySavedPost,
 } from "../../src/application-runtime";
 import {
@@ -19,7 +20,7 @@ import {
   readVerifyConfig,
 } from "../../src/config";
 import { checkArchiveFile } from "../../src/files/verify";
-import { savePost } from "../../src/save-post";
+import { parsePostDetailResponse } from "../../src/grok/adapter";
 import { databaseEnv, testSql, useIsolatedPostgres } from "../helpers/postgres";
 
 useIsolatedPostgres();
@@ -47,7 +48,7 @@ async function seed() {
     INSERT INTO post_work
       (post_id, status, selected_key, quality, mime_type,
        publish_temp_name, publish_relative_path, publish_expected_bytes, publish_sha256)
-    VALUES (${postId}, 'finalizing', 'https://imagine-public.x.ai/source.png',
+    VALUES (${postId}, 'finalizing', 'https://assets.grok.com/source.png',
       'image', 'image/png', ${tempName}, ${relativePath}, ${bytes.length}, ${digest})
   `;
   return readSaveConfig({
@@ -60,18 +61,44 @@ async function seed() {
 function matchingDetail() {
   return {
     connect: async () => ({
-      getPostDetail: async () => ({
-        kind: "post" as const,
-        selection: {
-          assetId: postId,
-          key: "https://imagine-public.x.ai/source.png",
-          quality: "image" as const,
-          mimeType: "image/png",
-        },
-      }),
+      getPostDetail: async () =>
+        parsePostDetailResponse(postId, {
+          status: 200,
+          contentType: "application/json",
+          finalPath: "/rest/app-chat/conversations/fixture",
+          body: {
+            assetId: postId,
+            key: "https://assets.grok.com/source.png",
+            mimeType: "image/png",
+          },
+        }),
       close: async () => {},
     }),
   };
+}
+
+async function saveViaApplication(
+  config: ReturnType<typeof readSaveConfig>,
+  id: string,
+  options: {
+    connect: (signal: AbortSignal) => Promise<{
+      getPostDetail: (
+        id: string,
+        signal: AbortSignal,
+      ) => Promise<import("../../src/grok/adapter").PostResponse>;
+      close: () => Promise<void>;
+    }>;
+    signal?: AbortSignal;
+    onStage?: (stage: string) => void;
+  },
+) {
+  return saveSelectedPost(
+    config,
+    id,
+    options.signal ?? new AbortController().signal,
+    options.onStage,
+    options.connect,
+  );
 }
 
 test("save post publishes a matching temp without replacing an existing target", async () => {
@@ -85,7 +112,7 @@ test("save post publishes a matching temp without replacing an existing target",
       digest,
     ),
   ).toEqual({ status: "ok" });
-  const result = await savePost(config, postId, matchingDetail());
+  const result = await saveViaApplication(config, postId, matchingDetail());
   expect(result.status, JSON.stringify(result)).toBe("ok");
   expect(
     await Bun.file(join(config.archiveRoot, relativePath)).bytes(),
@@ -123,7 +150,7 @@ test("matching final file settles intent while an unrelated temp name remains un
   const config = await seed();
   await writeFile(join(config.archiveRoot, relativePath), bytes);
   await symlink("unrelated", join(config.archiveRoot, postId, tempName));
-  const result = await savePost(config, postId, matchingDetail());
+  const result = await saveViaApplication(config, postId, matchingDetail());
   expect(result.status).toBe("failed");
   expect(result.message).toContain("已保存");
   expect(
@@ -167,7 +194,7 @@ test("conflicting final file keeps intent and exits nonzero from real CLI", asyn
 
 test("missing final and temp clear only the checked intent and leave pending download work", async () => {
   const config = await seed();
-  const result = await savePost(config, postId, matchingDetail());
+  const result = await saveViaApplication(config, postId, matchingDetail());
   expect(result.status).toBe("failed");
   expect(result.message).toContain("需要下载");
   const [work] = await testSql<
@@ -189,7 +216,7 @@ test("missing final and temp clear only the checked intent and leave pending dow
 test("mismatching temporary file remains finalizing and is never published", async () => {
   const config = await seed();
   await writeFile(join(config.archiveRoot, postId, tempName), "wrong");
-  const result = await savePost(config, postId, matchingDetail());
+  const result = await saveViaApplication(config, postId, matchingDetail());
   expect(result.status).toBe("failed");
   expect(result.message).toContain("临时文件");
   expect(await Bun.file(join(config.archiveRoot, relativePath)).exists()).toBe(
@@ -204,13 +231,13 @@ test("mismatching temporary file remains finalizing and is never published", asy
 test("saved recovery reads current detail and preserves recovered version when source changes", async () => {
   const config = await seed();
   await writeFile(join(config.archiveRoot, relativePath), bytes);
-  const result = await savePost(config, postId, {
+  const result = await saveViaApplication(config, postId, {
     connect: async () => ({
       getPostDetail: async () => ({
         kind: "post",
         selection: {
           assetId: postId,
-          key: "https://imagine-public.x.ai/new-source.png",
+          key: "https://assets.grok.com/new-source.png",
           quality: "image",
           mimeType: "image/png",
         },
@@ -244,7 +271,7 @@ test("saved recovery reads current detail and preserves recovered version when s
 test("current detail failure retains the recovered media version", async () => {
   const config = await seed();
   await writeFile(join(config.archiveRoot, relativePath), bytes);
-  const result = await savePost(config, postId, {
+  const result = await saveViaApplication(config, postId, {
     connect: async () => ({
       getPostDetail: async () => ({ kind: "unavailable", status: 404 }),
       close: async () => {},
@@ -264,13 +291,13 @@ test("current detail failure retains the recovered media version", async () => {
 test("current applicable size conflict does not reuse recovered file", async () => {
   const config = await seed();
   await writeFile(join(config.archiveRoot, relativePath), bytes);
-  const result = await savePost(config, postId, {
+  const result = await saveViaApplication(config, postId, {
     connect: async () => ({
       getPostDetail: async () => ({
         kind: "post",
         selection: {
           assetId: postId,
-          key: "https://imagine-public.x.ai/source.png",
+          key: "https://assets.grok.com/source.png",
           quality: "image",
           mimeType: "image/png",
           expectedBytes: bytes.length + 1,
@@ -294,7 +321,7 @@ test("stop during publication finishes the file and save transaction before retu
   const config = await seed();
   await writeFile(join(config.archiveRoot, postId, tempName), bytes);
   const controller = new AbortController();
-  const result = await savePost(config, postId, {
+  const result = await saveViaApplication(config, postId, {
     ...matchingDetail(),
     signal: controller.signal,
     onStage: (stage) => {
@@ -317,7 +344,7 @@ test("stop before publication leaves the intent and temp for the next save", asy
   const config = await seed();
   await writeFile(join(config.archiveRoot, postId, tempName), bytes);
   const controller = new AbortController();
-  const first = await savePost(config, postId, {
+  const first = await saveViaApplication(config, postId, {
     ...matchingDetail(),
     signal: controller.signal,
     onStage: (stage) => {
@@ -332,7 +359,7 @@ test("stop before publication leaves the intent and temp for the next save", asy
   expect(await Bun.file(join(config.archiveRoot, relativePath)).exists()).toBe(
     false,
   );
-  const resumed = await savePost(config, postId, matchingDetail());
+  const resumed = await saveViaApplication(config, postId, matchingDetail());
   expect(resumed.status).toBe("ok");
 });
 
@@ -390,7 +417,7 @@ test.each(["正式文件已发布", "提交保存结果", "保存结果已提交
     const config = await seed();
     await writeFile(join(config.archiveRoot, postId, tempName), bytes);
     const controller = new AbortController();
-    const first = await savePost(config, postId, {
+    const first = await saveViaApplication(config, postId, {
       ...matchingDetail(),
       signal: controller.signal,
       onStage: (stage) => {
@@ -398,7 +425,7 @@ test.each(["正式文件已发布", "提交保存结果", "保存结果已提交
       },
     });
     expect(first.status).toBe("cancelled");
-    const resumed = await savePost(config, postId, matchingDetail());
+    const resumed = await saveViaApplication(config, postId, matchingDetail());
     expect(resumed.status, resumed.message).toBe("ok");
     const [count] = await testSql<
       { count: number }[]
@@ -407,24 +434,24 @@ test.each(["正式文件已发布", "提交保存结果", "保存结果已提交
   },
 );
 
-test("save transaction failure leaves the published file and intent for the next save", async () => {
+test("known save transaction rollback leaves the published file and intent for the next save", async () => {
   const config = await seed();
   await writeFile(join(config.archiveRoot, postId, tempName), bytes);
   await testSql.unsafe(`
-    CREATE FUNCTION fail_save_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+    CREATE FUNCTION reject_save_update() RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN
-      IF NEW.status = 'saved' THEN RAISE EXCEPTION 'simulated receipt loss'; END IF;
+      IF NEW.status = 'saved' THEN RAISE EXCEPTION 'simulated transaction rollback'; END IF;
       RETURN NEW;
     END $$
   `);
   await testSql.unsafe(`
-    CREATE TRIGGER fail_save_commit BEFORE UPDATE ON post_work
-    FOR EACH ROW EXECUTE FUNCTION fail_save_commit()
+    CREATE TRIGGER reject_save_update BEFORE UPDATE ON post_work
+    FOR EACH ROW EXECUTE FUNCTION reject_save_update()
   `);
   try {
-    const first = await savePost(config, postId, matchingDetail());
+    const first = await saveViaApplication(config, postId, matchingDetail());
     expect(first.status).toBe("failed");
-    expect(first.message).toContain("结果未知");
+    expect(first.message).not.toContain("结果未知");
     expect(
       await Bun.file(join(config.archiveRoot, relativePath)).bytes(),
     ).toEqual(bytes);
@@ -434,11 +461,15 @@ test("save transaction failure leaves the published file and intent for the next
       SELECT status, publish_temp_name FROM post_work WHERE post_id = ${postId}
     `;
     expect(work).toEqual({ status: "finalizing", publish_temp_name: tempName });
+    const [run] = await testSql<{ outcome: string; finished: boolean }[]>`
+      SELECT outcome, finished_at IS NOT NULL AS finished FROM runs ORDER BY started_at DESC LIMIT 1
+    `;
+    expect(run).toEqual({ outcome: "failed", finished: true });
   } finally {
-    await testSql.unsafe("DROP TRIGGER fail_save_commit ON post_work");
-    await testSql.unsafe("DROP FUNCTION fail_save_commit()");
+    await testSql.unsafe("DROP TRIGGER reject_save_update ON post_work");
+    await testSql.unsafe("DROP FUNCTION reject_save_update()");
   }
-  const resumed = await savePost(config, postId, matchingDetail());
+  const resumed = await saveViaApplication(config, postId, matchingDetail());
   expect(resumed.status, resumed.message).toBe("ok");
   const [count] = await testSql<
     { count: number }[]
@@ -453,7 +484,7 @@ test("temp cleanup failure keeps saved fact and reports failure", async () => {
   const directory = join(config.archiveRoot, postId);
   await chmod(directory, 0o500);
   try {
-    const result = await savePost(config, postId, matchingDetail());
+    const result = await saveViaApplication(config, postId, matchingDetail());
     expect(result.status).toBe("failed");
     expect(result.message).toContain("已保存");
     expect(result.cleanupErrors.join(" ")).toContain("清理失败");
@@ -538,4 +569,201 @@ test("real CLI SIGINT during save transaction leaves a settled version", async (
     await testSql.unsafe("DROP TRIGGER delay_save_commit ON post_work");
     await testSql.unsafe("DROP FUNCTION delay_save_commit()");
   }
+});
+
+test("blocked current detail preserves global reason and recovered version", async () => {
+  const config = await seed();
+  await writeFile(join(config.archiveRoot, relativePath), bytes);
+  const result = await saveViaApplication(config, postId, {
+    connect: async () => ({
+      getPostDetail: async () => ({
+        kind: "blocked",
+        status: 429,
+        retryAfter: "60",
+      }),
+      close: async () => {},
+    }),
+  });
+  expect(result.status).toBe("blocked");
+  expect(result.message).toContain("HTTP 429");
+  expect(result.message).toContain("60");
+  const [work] = await testSql<
+    { status: string; saved_media_version_id: string }[]
+  >`
+    SELECT status, saved_media_version_id::text FROM post_work WHERE post_id = ${postId}
+  `;
+  expect(work?.status).toBe("saved");
+  expect(work?.saved_media_version_id).toBeTruthy();
+});
+
+test("known media version conflict is reported as conflict and finishes Run", async () => {
+  const config = await seed();
+  await writeFile(join(config.archiveRoot, relativePath), bytes);
+  await testSql`
+    INSERT INTO media_versions (id, post_id, sha256, byte_count, mime_type, relative_path, saved_at)
+    VALUES (${crypto.randomUUID()}::uuid, ${postId}, ${digest}, ${bytes.length + 1}, 'image/png', ${relativePath}, now())
+  `;
+  const result = await saveViaApplication(config, postId, matchingDetail());
+  expect(result.status).toBe("failed");
+  expect(result.message).toContain("冲突");
+  expect(result.message).not.toContain("提交结果未知");
+  const [run] = await testSql<{ outcome: string; finished: boolean }[]>`
+    SELECT outcome, finished_at IS NOT NULL AS finished FROM runs ORDER BY started_at DESC LIMIT 1
+  `;
+  expect(run).toEqual({ outcome: "failed", finished: true });
+  const [work] = await testSql<{ status: string }[]>`
+    SELECT status FROM post_work WHERE post_id = ${postId}
+  `;
+  expect(work?.status).toBe("finalizing");
+});
+
+test("committed save with lost application receipt resumes from saved DB fact", async () => {
+  const config = await seed();
+  await writeFile(join(config.archiveRoot, postId, tempName), bytes);
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--no-env-file",
+      "--preload",
+      "./tests/helpers/fake-save-browser.ts",
+      "--preload",
+      "./tests/helpers/lose-save-receipt.ts",
+      "src/cli.ts",
+      "save",
+      "post",
+      postId,
+    ],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...databaseEnv,
+        GROK_ARCHIVE_DIR: config.archiveRoot,
+        PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [stderr, code] = await Promise.all([
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(code, stderr).toBe(1);
+  expect(stderr).toContain("提交结果未知");
+  const [work] = await testSql<
+    { status: string; publish_temp_name: string | null }[]
+  >`
+    SELECT status, publish_temp_name FROM post_work WHERE post_id = ${postId}
+  `;
+  expect(work).toEqual({ status: "saved", publish_temp_name: null });
+  const resumed = await saveViaApplication(config, postId, matchingDetail());
+  expect(resumed.status, resumed.message).toBe("ok");
+  const [count] = await testSql<{ count: number }[]>`
+    SELECT count(*)::integer AS count FROM media_versions
+  `;
+  expect(count?.count).toBe(1);
+});
+
+test.each(["发布文件", "正式文件已发布", "提交保存结果", "保存结果已提交"])(
+  "real CLI process killed at %s resumes from persisted file and DB facts",
+  async (stage) => {
+    const config = await seed();
+    await writeFile(join(config.archiveRoot, postId, tempName), bytes);
+    const marker = join(config.archiveRoot, "stage-marker");
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "--no-env-file",
+        "--preload",
+        "./tests/helpers/fake-save-browser.ts",
+        "--preload",
+        "./tests/helpers/pause-save-stage.ts",
+        "src/cli.ts",
+        "save",
+        "post",
+        postId,
+      ],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...databaseEnv,
+          GROK_ARCHIVE_DIR: config.archiveRoot,
+          PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+          GMS_TEST_STOP_STAGE: stage,
+          GMS_TEST_STAGE_MARKER: marker,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    try {
+      const deadline = Date.now() + 5_000;
+      while (!(await Bun.file(marker).exists()) && Date.now() < deadline)
+        await Bun.sleep(20);
+      expect(await Bun.file(marker).exists()).toBe(true);
+      child.kill("SIGKILL");
+      await child.exited;
+      const [first] = await testSql<{ status: string }[]>`
+        SELECT status FROM post_work WHERE post_id = ${postId}
+      `;
+      expect(first?.status).toBe(
+        stage === "保存结果已提交" ? "saved" : "finalizing",
+      );
+      expect(
+        await Bun.file(join(config.archiveRoot, relativePath)).exists(),
+      ).toBe(stage !== "发布文件");
+      const resumed = await saveViaApplication(
+        config,
+        postId,
+        matchingDetail(),
+      );
+      expect(resumed.status, resumed.message).toBe("ok");
+      const [count] = await testSql<{ count: number }[]>`
+        SELECT count(*)::integer AS count FROM media_versions
+      `;
+      expect(count?.count).toBe(1);
+    } finally {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+  },
+);
+
+test("real CLI reports blocked detail and known wait without clearing saved fact", async () => {
+  const config = await seed();
+  await writeFile(join(config.archiveRoot, relativePath), bytes);
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--no-env-file",
+      "--preload",
+      "./tests/helpers/fake-save-browser.ts",
+      "src/cli.ts",
+      "save",
+      "post",
+      postId,
+    ],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...databaseEnv,
+        GROK_ARCHIVE_DIR: config.archiveRoot,
+        PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+        GMS_TEST_BLOCKED: "1",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [stderr, code] = await Promise.all([
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(code).toBe(1);
+  expect(stderr).toContain("HTTP 429");
+  expect(stderr).toContain("建议等待 60");
+  const [work] = await testSql<{ status: string }[]>`
+    SELECT status FROM post_work WHERE post_id = ${postId}
+  `;
+  expect(work?.status).toBe("saved");
 });
