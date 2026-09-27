@@ -12,7 +12,10 @@ import {
   readSaveConfig,
   readVerifyConfig,
 } from "../../src/config";
-import { UnconfirmedStopError } from "../../src/grok/adapter";
+import {
+  parsePostDetailResponse,
+  UnconfirmedStopError,
+} from "../../src/grok/adapter";
 import { databaseEnv, testSql, useIsolatedPostgres } from "../helpers/postgres";
 
 useIsolatedPostgres();
@@ -21,6 +24,7 @@ const png = Buffer.from(
   "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489",
   "hex",
 );
+const mp4 = Buffer.from("000000186674797069736f6d0000000069736f6d", "hex");
 let archiveRoot: string | undefined;
 
 afterEach(async () => {
@@ -90,6 +94,179 @@ test("S1 saves a complete selected image through the download capability", async
   >`SELECT status FROM post_work WHERE post_id = ${postId}`;
   expect(work?.status).toBe("saved");
 });
+
+test("S1 以所选 1080p MP4 响应长度保存并核验版本", async () => {
+  const config = await setup();
+  const requested: string[] = [];
+  const detail = parsePostDetailResponse(postId, {
+    status: 200,
+    contentType: "application/json",
+    finalPath: `/rest/assets/${postId}`,
+    body: {
+      assetId: postId,
+      mimeType: "video/mp4",
+      key: "https://videos.grok.com/base.mp4",
+      sizeBytes: 9999,
+      hdKey: "https://videos.grok.com/720.mp4",
+      hd1080Key: "https://videos.grok.com/1080.mp4",
+    },
+  });
+  const result = await saveSelectedPost(
+    config,
+    postId,
+    new AbortController().signal,
+    undefined,
+    async () => ({
+      getPostDetail: async () => detail,
+      downloadMedia: async (selection, onResponse, onChunk) => {
+        requested.push(selection.key ?? "");
+        await onResponse({
+          status: 200,
+          contentType: "video/mp4",
+          contentLength: String(mp4.length),
+          contentEncoding: null,
+        });
+        await onChunk(mp4);
+      },
+      close: async () => {},
+    }),
+  );
+  expect(result.status, result.message).toBe("ok");
+  expect(requested).toEqual(["https://videos.grok.com/1080.mp4"]);
+  expect(
+    (
+      await verifySavedPost(
+        readVerifyConfig({
+          ...databaseEnv,
+          GROK_ARCHIVE_DIR: config.archiveRoot,
+        }),
+        postId,
+      )
+    ).status,
+  ).toBe("ok");
+  const [work] = await testSql<
+    { status: string; quality: string; expected_bytes: string | null }[]
+  >`SELECT status, quality, expected_bytes::text FROM post_work WHERE post_id = ${postId}`;
+  const [version] = await testSql<
+    { byte_count: string; mime_type: string; relative_path: string }[]
+  >`SELECT byte_count::text, mime_type, relative_path FROM media_versions WHERE post_id = ${postId}`;
+  expect(work).toEqual({
+    status: "saved",
+    quality: "1080p",
+    expected_bytes: null,
+  });
+  expect(version).toMatchObject({
+    byte_count: String(mp4.length),
+    mime_type: "video/mp4",
+  });
+  expect(version?.relative_path.endsWith(".mp4")).toBe(true);
+});
+
+test("S1 高清传输失败及重读详情后仍只尝试最高候选", async () => {
+  const config = await setup();
+  let details = 0;
+  const requested: string[] = [];
+  const result = await saveSelectedPost(
+    config,
+    postId,
+    new AbortController().signal,
+    undefined,
+    async () => ({
+      getPostDetail: async () => {
+        details += 1;
+        return parsePostDetailResponse(postId, {
+          status: 200,
+          contentType: "application/json",
+          finalPath: `/rest/assets/${postId}`,
+          body: {
+            assetId: postId,
+            mimeType: "video/mp4",
+            key: "https://videos.grok.com/base.mp4",
+            hdKey: "https://videos.grok.com/720.mp4",
+            hd1080Key: `https://videos.grok.com/1080-${details}.mp4`,
+          },
+        });
+      },
+      downloadMedia: async (selection, onResponse, onChunk) => {
+        requested.push(selection.key ?? "");
+        await onResponse({
+          status: 200,
+          contentType: "video/mp4",
+          contentLength: String(mp4.length),
+          contentEncoding: null,
+        });
+        await onChunk(mp4.subarray(0, 12));
+      },
+      close: async () => {},
+    }),
+  );
+  expect(result.status).toBe("failed");
+  expect(details).toBe(2);
+  expect(requested).toEqual([
+    "https://videos.grok.com/1080-1.mp4",
+    "https://videos.grok.com/1080-2.mp4",
+  ]);
+  const [work] = await testSql<
+    { status: string; quality: string; publish_sha256: string | null }[]
+  >`SELECT status, quality, publish_sha256 FROM post_work WHERE post_id = ${postId}`;
+  expect(work).toEqual({
+    status: "failed",
+    quality: "1080p",
+    publish_sha256: null,
+  });
+});
+
+test.each([
+  ["访问失败", 403, "video/mp4", String(mp4.length), 1],
+  ["响应类型错误", 200, "text/html", String(mp4.length), 2],
+  ["缺少可信长度", 200, "video/mp4", null, 2],
+] as const)(
+  "S1 最高视频候选%s时不降级或发布",
+  async (_case, status, contentType, contentLength, expectedTransfers) => {
+    const config = await setup();
+    const requested: string[] = [];
+    const result = await saveSelectedPost(
+      config,
+      postId,
+      new AbortController().signal,
+      undefined,
+      async () => ({
+        getPostDetail: async () =>
+          parsePostDetailResponse(postId, {
+            status: 200,
+            contentType: "application/json",
+            finalPath: `/rest/assets/${postId}`,
+            body: {
+              assetId: postId,
+              mimeType: "video/mp4",
+              key: "https://videos.grok.com/base.mp4",
+              hdKey: "https://videos.grok.com/720.mp4",
+              hd1080Key: "https://videos.grok.com/1080.mp4",
+            },
+          }),
+        downloadMedia: async (selection, onResponse, onChunk) => {
+          requested.push(selection.key ?? "");
+          await onResponse({
+            status,
+            contentType,
+            contentLength,
+            contentEncoding: null,
+          });
+          await onChunk(mp4);
+        },
+        close: async () => {},
+      }),
+    );
+    expect(result.status).toBe("failed");
+    expect(requested).toEqual(
+      Array(expectedTransfers).fill("https://videos.grok.com/1080.mp4"),
+    );
+    const [work] = await testSql<
+      { status: string; publish_sha256: string | null }[]
+    >`SELECT status, publish_sha256 FROM post_work WHERE post_id = ${postId}`;
+    expect(work).toEqual({ status: "failed", publish_sha256: null });
+  },
+);
 
 test("S1 reports an unowned connect.html notice without turning a committed save into cleanup failure", async () => {
   const config = await setup();
@@ -561,11 +738,12 @@ test("S1 removes its verified temp when stopped before committing the publish in
 });
 
 test.each([
-  ["complete", "0", 0, "saved"],
-  ["SIGINT", "1", 130, "pending"],
+  ["complete image", "0", "0", 0, "saved"],
+  ["complete video", "0", "1", 0, "saved"],
+  ["SIGINT image", "1", "0", 130, "pending"],
 ] as const)(
   "S2 real CLI %s media transfer reports exit and durable fact",
-  async (_label, abort, expectedExit, expectedStatus) => {
+  async (_label, abort, video, expectedExit, expectedStatus) => {
     const config = await setup();
     const child = Bun.spawn(
       [
@@ -588,6 +766,7 @@ test.each([
           GROK_API_INTERVAL_MAX_SECONDS: "0",
           GMS_TEST_MEDIA: "1",
           GMS_TEST_ABORT_MEDIA: abort,
+          GMS_TEST_VIDEO: video,
         },
         stdout: "pipe",
         stderr: "pipe",
@@ -599,6 +778,12 @@ test.each([
       child.exited,
     ]);
     expect(exit, `${stdout}\n${stderr}`).toBe(expectedExit);
+    if (video === "1" && expectedExit === 0) {
+      expect(stdout).toContain("video/mp4");
+      expect(stdout).toContain("Post 保存完成");
+      expect(stdout).not.toContain("fixture-token");
+      expect(stderr).not.toContain("fixture-token");
+    }
     const [work] = await testSql<
       { status: string }[]
     >`SELECT status FROM post_work WHERE post_id = ${postId}`;

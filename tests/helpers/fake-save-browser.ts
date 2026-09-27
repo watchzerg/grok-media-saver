@@ -27,8 +27,12 @@ mock.module("../../src/browser/session.ts", () => ({
           retryAfter: process.env.GMS_TEST_BLOCKED === "1" ? "60" : undefined,
           body: {
             assetId: postId,
-            key: "https://assets.grok.com/source.png",
-            mimeType: "image/png",
+            key:
+              process.env.GMS_TEST_VIDEO === "1"
+                ? "https://videos.grok.com/source.mp4"
+                : "https://assets.grok.com/source.png",
+            mimeType:
+              process.env.GMS_TEST_VIDEO === "1" ? "video/mp4" : "image/png",
           },
         });
       },
@@ -40,12 +44,17 @@ mock.module("../../src/browser/session.ts", () => ({
               onChunk: (chunk: Uint8Array) => Promise<void>,
             ) => {
               const image = Buffer.from(
-                "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489",
+                process.env.GMS_TEST_VIDEO === "1"
+                  ? "000000186674797069736f6d0000000069736f6d"
+                  : "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489",
                 "hex",
               );
               await onResponse({
                 status: 200,
-                contentType: "image/png",
+                contentType:
+                  process.env.GMS_TEST_VIDEO === "1"
+                    ? "video/mp4"
+                    : "image/png",
                 contentLength: String(image.length),
                 contentEncoding: null,
               });
