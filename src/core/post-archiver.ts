@@ -122,14 +122,8 @@ export async function archivePost({
     const detail = await readCurrentDetail();
     if (detail.kind !== "post") {
       if (detail.kind === "blocked") {
-        const reason =
-          detail.reason === "authentication" ? "登录或 challenge" : "请求限流";
-        const status = detail.status ? `HTTP ${detail.status}` : "";
-        const wait = detail.retryAfter
-          ? `；服务端建议等待 ${detail.retryAfter}`
-          : "";
         result.status = "blocked";
-        result.message = `Post 请求被阻挡（${[reason, status].filter(Boolean).join("，")}）${wait}。`;
+        result.message = blockedDetailMessage(detail);
       }
       if (detail.kind !== "blocked" && work?.status !== "finalizing") {
         await store.failUnreadableDetail(postId, runId);
@@ -231,7 +225,7 @@ export async function archivePost({
           const next = await readCurrentDetail();
           if (next.kind === "blocked") {
             result.status = "blocked";
-            result.message = "Post 详情重读被阻挡。";
+            result.message = blockedDetailMessage(next);
             return;
           }
           if (next.kind !== "post") {
@@ -317,4 +311,14 @@ export async function archivePost({
       await store.assertLock();
     }
   }
+}
+
+function blockedDetailMessage(
+  detail: Extract<PostResponse, { kind: "blocked" }>,
+) {
+  const reason =
+    detail.reason === "authentication" ? "登录或 challenge" : "请求限流";
+  const status = detail.status ? `HTTP ${detail.status}` : "";
+  const wait = detail.retryAfter ? `；服务端建议等待 ${detail.retryAfter}` : "";
+  return `Post 请求被阻挡（${[reason, status].filter(Boolean).join("，")}）${wait}。`;
 }

@@ -32,24 +32,25 @@ mock.module("../../src/browser/session.ts", () => ({
             attempts > 1)
         )
           throw new RetryableRequestError("simulated detail network failure");
+        const blocked =
+          process.env.GMS_TEST_BLOCKED === "1" ||
+          process.env.GMS_TEST_BLOCKED_ID === postId ||
+          (process.env.GMS_TEST_MEDIA_RETRY_BLOCKED_ID === postId &&
+            attempts > 1);
         return parsePostDetailResponse(postId, {
-          status:
-            process.env.GMS_TEST_BLOCKED === "1" ||
-            process.env.GMS_TEST_BLOCKED_ID === postId
-              ? 429
-              : process.env.GMS_TEST_UNAVAILABLE === "1" ||
-                  process.env.GMS_TEST_UNAVAILABLE_ID === postId
-                ? 404
-                : process.env.GMS_TEST_RETRY_DETAIL === "1" && attempts === 1
-                  ? 503
-                  : 200,
+          status: blocked
+            ? 429
+            : process.env.GMS_TEST_UNAVAILABLE === "1" ||
+                process.env.GMS_TEST_UNAVAILABLE_ID === postId
+              ? 404
+              : process.env.GMS_TEST_RETRY_DETAIL === "1" && attempts === 1
+                ? 503
+                : 200,
           contentType: "application/json",
           finalPath: "/rest/app-chat/conversations/fixture",
-          retryAfter:
-            process.env.GMS_TEST_BLOCKED === "1" ||
-            process.env.GMS_TEST_BLOCKED_ID === postId
-              ? (process.env.GMS_TEST_RETRY_AFTER ?? "60")
-              : undefined,
+          retryAfter: blocked
+            ? (process.env.GMS_TEST_RETRY_AFTER ?? "60")
+            : undefined,
           body: {
             assetId: postId,
             key:
@@ -74,7 +75,8 @@ mock.module("../../src/browser/session.ts", () => ({
             ) => {
               if (
                 process.env.GMS_TEST_MEDIA_RETRY_DETAIL_FAILURE_ID ===
-                currentPostId
+                  currentPostId ||
+                process.env.GMS_TEST_MEDIA_RETRY_BLOCKED_ID === currentPostId
               ) {
                 await onResponse({
                   status: 503,

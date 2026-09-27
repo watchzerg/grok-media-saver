@@ -1,6 +1,13 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -435,9 +442,11 @@ test.each([
   { response: "unavailable", blocked: false, closeFailure: true },
   { response: "blocked", blocked: true, closeFailure: false },
   { response: "blocked", blocked: true, closeFailure: true },
+  { response: "media-retry-blocked", blocked: true, closeFailure: false },
+  { response: "media-retry-blocked", blocked: true, closeFailure: true },
 ])(
   "retry 保留返回式 $response 的原因与计数（cleanup=$closeFailure）",
-  async ({ blocked, closeFailure }) => {
+  async ({ response, blocked, closeFailure }) => {
     await resetSchema();
     const root = await mkdtemp(join(tmpdir(), "gms-retry-return-cleanup-"));
     const first = "123e4567-e89b-42d3-a456-426614174000";
@@ -450,7 +459,11 @@ test.each([
         GMS_TEST_MEDIA: "1",
         ...(closeFailure ? { GMS_TEST_CLOSE_FAILURE: "1" } : {}),
         GMS_TEST_RETRY_AFTER: `60 fixture-token ${databaseEnv.GROK_DB_PASSWORD} https://example.invalid/?token=private-query`,
-        [blocked ? "GMS_TEST_BLOCKED_ID" : "GMS_TEST_UNAVAILABLE_ID"]: first,
+        [response === "media-retry-blocked"
+          ? "GMS_TEST_MEDIA_RETRY_BLOCKED_ID"
+          : blocked
+            ? "GMS_TEST_BLOCKED_ID"
+            : "GMS_TEST_UNAVAILABLE_ID"]: first,
       });
       expect(result.exitCode, result.stderr).toBe(1);
       const stopped = blocked || closeFailure;
@@ -476,6 +489,16 @@ test.each([
         failed: 1,
         unprocessed: stopped ? 1 : 0,
       });
+      if (response === "media-retry-blocked") {
+        const [work] = await testSql<
+          { status: string; saved_media_version_id: string | null }[]
+        >`SELECT status,saved_media_version_id FROM post_work WHERE post_id=${first}`;
+        expect(work).toEqual({
+          status: "pending",
+          saved_media_version_id: null,
+        });
+        expect(await readdir(join(root, first))).toEqual([]);
+      }
       const [later] = await testSql<{ last_run_id: string | null }[]>`
       SELECT last_run_id FROM post_work WHERE post_id=${second}`;
       if (stopped) expect(later?.last_run_id).toBeNull();
