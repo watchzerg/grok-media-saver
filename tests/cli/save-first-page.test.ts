@@ -15,6 +15,7 @@ const ids = [
   "123e4567-e89b-42d3-a456-426614174001",
   "123e4567-e89b-42d3-a456-426614174002",
   "123e4567-e89b-42d3-a456-426614174003",
+  "123e4567-e89b-42d3-a456-426614174004",
 ];
 
 async function run(env: Record<string, string>) {
@@ -149,13 +150,13 @@ test("S2 save first-page handles mixed results serially and leaves later members
       GROK_API_INTERVAL_MAX_SECONDS: "0",
       GMS_TEST_PAGE_IDS: ids.join(","),
       GMS_TEST_VIDEO_ID: ids[0] ?? "",
-      GMS_TEST_UNAVAILABLE_ID: ids[1] ?? "",
-      GMS_TEST_BLOCKED_ID: ids[2] ?? "",
+      GMS_TEST_UNAVAILABLE_ID: ids[2] ?? "",
+      GMS_TEST_BLOCKED_ID: ids[3] ?? "",
       GMS_TEST_MEDIA: "1",
       GMS_TEST_REQUEST_EVENTS: events,
     });
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("已保存 1，失败 2，未处理 1");
+    expect(result.stderr).toContain("已保存 2，失败 2，未处理 1");
     const requests = (await readFile(events, "utf8"))
       .trim()
       .split("\n")
@@ -165,15 +166,23 @@ test("S2 save first-page handles mixed results serially and leaves later members
       `detail:${ids[0]}`,
       `media:${ids[0]}`,
       `detail:${ids[1]}`,
+      `media:${ids[1]}`,
       `detail:${ids[2]}`,
+      `detail:${ids[3]}`,
     ]);
     const [savedRun] = await testSql<
       { summary: unknown }[]
     >`SELECT summary FROM runs WHERE command='save-first-page'`;
-    expect(savedRun?.summary).toEqual({ saved: 1, failed: 2, unprocessed: 1 });
+    expect(savedRun?.summary).toEqual({ saved: 2, failed: 2, unprocessed: 1 });
+    const savedWorks = await testSql<
+      { post_id: string; status: string }[]
+    >`SELECT post_id, status FROM post_work WHERE status='saved' ORDER BY post_id`;
+    expect(savedWorks).toEqual(
+      ids.slice(0, 2).map((post_id) => ({ post_id, status: "saved" })),
+    );
     const [laterWork] = await testSql<
       { count: number }[]
-    >`SELECT count(*)::integer AS count FROM post_work WHERE post_id=${ids[3]}`;
+    >`SELECT count(*)::integer AS count FROM post_work WHERE post_id=${ids[4]}`;
     expect(laterWork?.count).toBe(0);
   } finally {
     await rm(root, { recursive: true, force: true });
