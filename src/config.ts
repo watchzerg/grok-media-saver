@@ -13,6 +13,10 @@ export type DatabaseConfig = {
   database: string;
 };
 
+export type VerifyConfig = DatabaseConfig & {
+  archiveRoot: string;
+};
+
 export function readDatabaseConfig(
   env: Record<string, string | undefined>,
 ): DatabaseConfig {
@@ -25,6 +29,14 @@ export function readDatabaseConfig(
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new Error("GROK_DB_PORT 必须是 1 到 65535 之间的整数。");
   return { host, port, username, password, database };
+}
+
+export function readVerifyConfig(
+  env: Record<string, string | undefined>,
+): VerifyConfig {
+  const database = readDatabaseConfig(env);
+  const archiveRoot = requiredValue(env.GROK_ARCHIVE_DIR, "GROK_ARCHIVE_DIR");
+  return { ...database, archiveRoot };
 }
 
 function requiredValue(value: string | undefined, key: string): string {

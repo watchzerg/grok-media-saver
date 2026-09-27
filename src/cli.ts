@@ -3,17 +3,19 @@ import {
   inspectSavedFirstPage,
   inspectSavedPost,
   readProjectStatus,
+  verifySavedPost,
 } from "./application-runtime";
 import {
   type DatabaseConfig,
   type InspectConfig,
   readDatabaseConfig,
   readInspectConfig,
+  readVerifyConfig,
 } from "./config";
 import { normalizePostId } from "./grok/adapter";
 
 const usage =
-  "用法：grok-media-saver db init | status | inspect first-page | inspect post <Post ID>";
+  "用法：grok-media-saver db init | status | verify <Post ID> | inspect first-page | inspect post <Post ID>";
 
 type CliDependencies = {
   initializeProjectDatabase: typeof initializeProjectDatabase;
@@ -29,6 +31,7 @@ export async function main(
   const isDatabaseInit =
     args.length === 2 && args[0] === "db" && args[1] === "init";
   const isStatus = args.length === 1 && args[0] === "status";
+  const isVerify = args.length === 2 && args[0] === "verify";
   const isPost =
     args.length === 3 && args[0] === "inspect" && args[1] === "post";
   if (isDatabaseInit) {
@@ -81,15 +84,33 @@ export async function main(
     for (const error of result.cleanupErrors) console.error(error);
     return result.status === "ok" ? 0 : 1;
   }
-  if (!isFirstPage && !isPost) {
+  if (!isFirstPage && !isPost && !isVerify) {
     console.error(usage);
     return 2;
   }
 
-  const assetId = isPost ? normalizePostId(args[2]) : undefined;
-  if (isPost && !assetId) {
+  const assetId = isPost
+    ? normalizePostId(args[2])
+    : isVerify
+      ? normalizePostId(args[1])
+      : undefined;
+  if ((isPost || isVerify) && !assetId) {
     console.error("Post ID 必须是带连字符的 UUID。");
     return 2;
+  }
+
+  if (isVerify) {
+    let config: ReturnType<typeof readVerifyConfig>;
+    try {
+      config = readVerifyConfig(env);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "配置无效。");
+      return 2;
+    }
+    const result = await verifySavedPost(config, assetId as string);
+    console.log(result.message);
+    for (const error of result.cleanupErrors) console.error(error);
+    return result.status === "ok" ? 0 : 1;
   }
 
   let config: InspectConfig;

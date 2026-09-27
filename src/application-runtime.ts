@@ -1,7 +1,8 @@
 import type { SQL } from "bun";
 import { inspectFirstPage, inspectPost } from "./application";
 import { connectBrowserSession } from "./browser/session";
-import type { DatabaseConfig, InspectConfig } from "./config";
+import type { DatabaseConfig, InspectConfig, VerifyConfig } from "./config";
+import { checkArchiveFile } from "./files/verify";
 import { createRequestScheduler } from "./grok/request-scheduler";
 import { connectDatabase, safeDatabaseError } from "./store/database";
 import { initializeSchema, verifySchema } from "./store/schema";
@@ -21,6 +22,12 @@ export type ProjectStatusResult = DatabaseResult & {
     summary: Record<string, unknown> | null;
   } | null;
   unfinishedPosts: { postId: string; status: string }[];
+};
+
+export type VerifyResult = {
+  status: "ok" | "failed";
+  message: string;
+  cleanupErrors: string[];
 };
 
 export type DatabaseCloser = (
@@ -64,6 +71,75 @@ export function readProjectStatus(
   close: DatabaseCloser = closeDatabase,
 ): Promise<ProjectStatusResult> {
   return withStatusDatabase(config, close);
+}
+
+export async function verifySavedPost(
+  config: VerifyConfig,
+  postId: string,
+  close: DatabaseCloser = closeDatabase,
+): Promise<VerifyResult> {
+  let sql: ReturnType<typeof connectDatabase> | undefined;
+  let result: VerifyResult = {
+    status: "failed",
+    message: "文件核验失败。",
+    cleanupErrors: [],
+  };
+  try {
+    sql = connectDatabase(config);
+    await verifySchema(sql);
+    const [saved] = await sql<
+      { relativePath: string; byteCount: string; sha256: string }[]
+    >`
+      SELECT m.relative_path AS "relativePath", m.byte_count::text AS "byteCount",
+        m.sha256
+      FROM post_work w
+      JOIN media_versions m
+        ON m.post_id = w.post_id AND m.id = w.saved_media_version_id
+      WHERE w.post_id = ${postId}
+    `;
+    if (!saved) {
+      result.message = `Post ${postId} 没有可核验的保存记录。`;
+    } else {
+      const check = await checkArchiveFile(
+        config.archiveRoot,
+        saved.relativePath,
+        Number(saved.byteCount),
+        saved.sha256,
+      );
+      const detail: Record<string, string> = {
+        missing: "保存文件缺失。",
+        directory: "保存路径是目录。",
+        symlink: "保存路径是符号链接。",
+        mismatch: "文件大小或 SHA-256 与保存记录不符。",
+      };
+      result =
+        check.status === "ok"
+          ? {
+              status: "ok",
+              message: `Post ${postId} 文件核验通过。`,
+              cleanupErrors: [],
+            }
+          : {
+              status: "failed",
+              message: `Post ${postId} 文件核验异常：${check.status === "failed" ? check.reason : detail[check.status]}`,
+              cleanupErrors: [],
+            };
+    }
+  } catch (error) {
+    result.message = `文件核验失败：${safeDatabaseError(error, config)}.`;
+  }
+  if (sql) {
+    try {
+      await close(sql, 5);
+    } catch (error) {
+      result.cleanupErrors.push(
+        `数据库关闭失败：${safeDatabaseError(error, config)}`,
+      );
+      result.status = "failed";
+      result.message = `文件核验已完成，但数据库连接关闭失败。`;
+    }
+  }
+  return result;
 }
 
 async function withStatusDatabase(

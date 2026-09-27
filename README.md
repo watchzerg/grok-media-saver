@@ -41,6 +41,16 @@ mise exec -- bun src/cli.ts db init
 mise exec -- bun src/cli.ts status
 ```
 
+## 核验指定 Post 的本地文件
+
+`verify` 读取 PostgreSQL 中该 Post 的保存版本，并只在 `GROK_ARCHIVE_DIR` 当前目录下按记录的相对路径核对普通文件大小与 SHA-256。它不连接浏览器，不创建 Run，也不修复或改写保存状态。成功退出码为 `0`，核验异常为 `1`，参数或配置错误为 `2`。
+
+```sh
+mise exec -- bun src/cli.ts verify <Post-ID>
+```
+
+数据库与归档根目录需分别配置；示例见[`.env.example`](.env.example)。切换 `GROK_ARCHIVE_DIR` 后只检查新目录，不搜索旧目录。
+
 ## 只读检查指定 Post
 
 传入带连字符的 Post UUID；程序会去除首尾空白并转成小写。输出只包含媒体类型和所选画质，不输出媒体 URL 或详情响应。
