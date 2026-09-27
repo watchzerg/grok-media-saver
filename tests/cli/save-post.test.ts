@@ -358,6 +358,35 @@ test("stop during detail response does not record a successful Run", async () =>
   expect(run?.outcome).toBe("stopped");
 });
 
+test("stop after checking a saved file does not report successful reuse", async () => {
+  const config = await seed();
+  await writeFile(join(config.archiveRoot, relativePath), bytes);
+  expect(
+    (await saveViaApplication(config, postId, matchingDetail())).status,
+  ).toBe("ok");
+  const controller = new AbortController();
+  const stages: string[] = [];
+  const result = await saveViaApplication(config, postId, {
+    ...matchingDetail(),
+    signal: controller.signal,
+    onStage: (stage) => {
+      stages.push(stage);
+      if (stage === "已核验保存文件") controller.abort();
+    },
+  });
+  expect(stages).toContain("已核验保存文件");
+  expect(result.status).toBe("cancelled");
+  expect(result.saveRecorded).toBe(true);
+  const [run] = await testSql<{ outcome: string }[]>`
+    SELECT outcome FROM runs ORDER BY started_at DESC LIMIT 1
+  `;
+  expect(run?.outcome).toBe("stopped");
+  const [work] = await testSql<{ status: string }[]>`
+    SELECT status FROM post_work WHERE post_id = ${postId}
+  `;
+  expect(work?.status).toBe("saved");
+});
+
 test("current applicable size conflict does not reuse recovered file", async () => {
   const config = await seed();
   await writeFile(join(config.archiveRoot, relativePath), bytes);
@@ -561,6 +590,75 @@ test("real CLI stops if SIGINT arrives while detail is returning", async () => {
     SELECT outcome FROM runs ORDER BY started_at DESC LIMIT 1
   `;
   expect(run?.outcome).toBe("stopped");
+});
+
+test("real CLI SIGINT while checking a saved file exits stopped", async () => {
+  const config = await seed();
+  await writeFile(join(config.archiveRoot, relativePath), bytes);
+  expect(
+    (await saveViaApplication(config, postId, matchingDetail())).status,
+  ).toBe("ok");
+  const largeBytes = Buffer.alloc(64 * 1024 * 1024, 7);
+  const largeDigest = new Bun.CryptoHasher("sha256")
+    .update(largeBytes)
+    .digest("hex");
+  const largeRelativePath = `${postId}/${largeDigest}.png`;
+  await writeFile(join(config.archiveRoot, largeRelativePath), largeBytes);
+  await testSql`
+    UPDATE media_versions
+    SET sha256 = ${largeDigest}, byte_count = ${largeBytes.length},
+        relative_path = ${largeRelativePath}
+    WHERE post_id = ${postId}
+  `;
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--no-env-file",
+      "--preload",
+      "./tests/helpers/fake-save-browser.ts",
+      "src/cli.ts",
+      "save",
+      "post",
+      postId,
+    ],
+    {
+      cwd: process.cwd(),
+      env: {
+        ...databaseEnv,
+        GROK_ARCHIVE_DIR: config.archiveRoot,
+        PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  let sawCheckStage = false;
+  const output = (async () => {
+    let stdout = "";
+    for await (const chunk of child.stdout) {
+      stdout += Buffer.from(chunk).toString();
+      if (!sawCheckStage && stdout.includes("阶段：核验已保存文件。")) {
+        sawCheckStage = true;
+        child.kill("SIGINT");
+      }
+    }
+    return stdout;
+  })();
+  const [stdout, stderr, exitCode] = await Promise.all([
+    output,
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect(sawCheckStage, stdout).toBe(true);
+  expect(exitCode, stderr).toBe(130);
+  const [run] = await testSql<{ outcome: string }[]>`
+    SELECT outcome FROM runs ORDER BY started_at DESC LIMIT 1
+  `;
+  expect(run?.outcome).toBe("stopped");
+  const [work] = await testSql<{ status: string }[]>`
+    SELECT status FROM post_work WHERE post_id = ${postId}
+  `;
+  expect(work?.status).toBe("saved");
 });
 
 test.each(["正式文件已发布", "提交保存结果", "保存结果已提交"])(

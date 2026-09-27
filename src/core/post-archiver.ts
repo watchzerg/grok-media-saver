@@ -139,6 +139,7 @@ export async function archivePost({
         postId,
         work.savedMediaVersionId,
       );
+      onStage?.("核验已保存文件");
       const check =
         version &&
         (detail.selection.expectedBytes === undefined ||
@@ -150,6 +151,8 @@ export async function archivePost({
               version.sha256,
             )
           : { status: "mismatch" as const };
+      onStage?.("已核验保存文件");
+      if (signal.aborted) throw new Error("保存已停止。");
       if (check.status === "ok") {
         result.status = "ok";
         result.message = saved
