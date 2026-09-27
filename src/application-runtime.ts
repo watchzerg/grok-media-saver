@@ -93,6 +93,9 @@ export async function retryUnfinishedPosts(
     | undefined;
   let lockAcquired = false;
   let runId: string | undefined;
+  let runCreated = false;
+  let runTerminalWriteAcknowledged = false;
+  let runWriteUnknown = false;
   let result: RetryResult = {
     status: "failed",
     message: "重试执行失败。",
@@ -103,7 +106,9 @@ export async function retryUnfinishedPosts(
     if (signal?.aborted) {
       result = {
         status: "cancelled",
-        message: "重试已停止。",
+        message: runWriteUnknown
+          ? "重试已停止；Run 写入结果未知，未确认记账。"
+          : "重试已停止。",
         cleanupErrors: [],
       };
       return result;
@@ -113,7 +118,9 @@ export async function retryUnfinishedPosts(
     if (signal?.aborted) {
       result = {
         status: "cancelled",
-        message: "重试已停止。",
+        message: runWriteUnknown
+          ? "重试已停止；Run 写入结果未知，未确认记账。"
+          : "重试已停止。",
         cleanupErrors: [],
       };
     } else {
@@ -122,7 +129,9 @@ export async function retryUnfinishedPosts(
     if (signal?.aborted) {
       result = {
         status: "cancelled",
-        message: "重试已停止。",
+        message: runWriteUnknown
+          ? "重试已停止；Run 写入结果未知，未确认记账。"
+          : "重试已停止。",
         cleanupErrors: [],
       };
     }
@@ -159,46 +168,87 @@ export async function retryUnfinishedPosts(
           };
         } else {
           runId = crypto.randomUUID();
-          await session`
+          runWriteUnknown = true;
+          const inserted = await session<{ id: string }[]>`
             INSERT INTO runs (id, command, started_at)
             VALUES (${runId}::uuid, 'retry', now())
+            RETURNING id::text AS id
           `;
+          runCreated = inserted.length === 1 && inserted[0]?.id === runId;
+          runWriteUnknown = false;
+          if (!runCreated) throw new Error("Run 创建结果未确认。");
           await assertExecutorLock(session);
 
           if (signal?.aborted) {
-            await finishStoppedRun(session, runId);
-            result = {
-              status: "cancelled",
-              message: "重试已停止。Run 已记录停止结果。",
-              cleanupErrors: [],
-            };
+            const stopped = await finishStoppedRun(
+              session,
+              runId,
+              (unknown, finished) => {
+                runWriteUnknown = unknown;
+                if (finished) runTerminalWriteAcknowledged = true;
+              },
+            );
+            result = stopped
+              ? {
+                  status: "cancelled",
+                  message: "重试已停止。Run 已记录停止结果。",
+                  cleanupErrors: [],
+                }
+              : {
+                  status: "cancelled",
+                  message: "重试已停止；Run 未记录停止结果。",
+                  cleanupErrors: [],
+                };
           } else {
             const [pending] = await session<{ count: number }[]>`
               SELECT count(*)::integer AS count FROM post_work WHERE status <> 'saved'
             `;
             await assertExecutorLock(session);
             if (signal?.aborted) {
-              await finishStoppedRun(session, runId);
-              result = {
-                status: "cancelled",
-                message: "重试已停止。Run 已记录停止结果。",
-                cleanupErrors: [],
-              };
+              const stopped = await finishStoppedRun(
+                session,
+                runId,
+                (unknown, finished) => {
+                  runWriteUnknown = unknown;
+                  if (finished) runTerminalWriteAcknowledged = true;
+                },
+              );
+              result = stopped
+                ? {
+                    status: "cancelled",
+                    message: "重试已停止。Run 已记录停止结果。",
+                    cleanupErrors: [],
+                  }
+                : {
+                    status: "cancelled",
+                    message: "重试已停止；Run 未记录停止结果。",
+                    cleanupErrors: [],
+                  };
             } else if ((pending?.count ?? 0) > 0) {
               result.message = `重试失败：当前有 ${pending?.count ?? 0} 个未完成 Post，尚未实现非空重试。`;
-              await session`
+              runWriteUnknown = true;
+              const updated = await session<{ id: string }[]>`
                 UPDATE runs
                 SET finished_at = now(), outcome = 'failed'
                 WHERE id = ${runId}::uuid
+                RETURNING id::text AS id
               `;
+              runWriteUnknown = false;
+              runTerminalWriteAcknowledged = true;
+              if (updated.length !== 1) throw new Error("Run 失败结果未记录。");
               await assertExecutorLock(session);
             } else {
-              await session`
+              runWriteUnknown = true;
+              const updated = await session<{ id: string }[]>`
                 UPDATE runs
                 SET finished_at = now(), outcome = 'succeeded',
                   summary = '{"saved":0,"failed":0,"unprocessed":0}'::jsonb
                 WHERE id = ${runId}::uuid
+                RETURNING id::text AS id
               `;
+              runWriteUnknown = false;
+              runTerminalWriteAcknowledged = true;
+              if (updated.length !== 1) throw new Error("Run 成功结果未记录。");
               await assertExecutorLock(session);
               result = signal?.aborted
                 ? {
@@ -223,10 +273,25 @@ export async function retryUnfinishedPosts(
         message: "重试已停止。",
         cleanupErrors: [],
       };
-      if (runId && session) {
+      if (
+        runId &&
+        runCreated &&
+        !runTerminalWriteAcknowledged &&
+        !runWriteUnknown &&
+        session
+      ) {
         try {
-          await finishStoppedRun(session, runId);
-          result.message = "重试已停止。Run 已记录停止结果。";
+          const stopped = await finishStoppedRun(
+            session,
+            runId,
+            (unknown, finished) => {
+              runWriteUnknown = unknown;
+              if (finished) runTerminalWriteAcknowledged = true;
+            },
+          );
+          result.message = stopped
+            ? "重试已停止。Run 已记录停止结果。"
+            : "重试已停止；Run 未记录停止结果。";
         } catch (stopError) {
           result.cleanupErrors.push(
             `停止 Run 收尾失败：${safeDatabaseError(stopError, config)}`,
@@ -234,18 +299,30 @@ export async function retryUnfinishedPosts(
         }
       }
     } else {
-      result.message = `重试执行失败：${safeDatabaseError(error, config)}`;
+      result.message = runWriteUnknown
+        ? `重试结果未知；未确认 Run 记账：${safeDatabaseError(error, config)}`
+        : `重试执行失败：${safeDatabaseError(error, config)}`;
     }
-    if (!signal?.aborted && runId && session) {
+    if (
+      !signal?.aborted &&
+      runId &&
+      runCreated &&
+      !runTerminalWriteAcknowledged &&
+      !runWriteUnknown &&
+      session
+    ) {
       try {
         await assertExecutorLock(session);
+        runWriteUnknown = true;
         await session`
           UPDATE runs
           SET finished_at = now(), outcome = 'failed'
           WHERE id = ${runId}::uuid AND finished_at IS NULL
         `;
+        runWriteUnknown = false;
+        runTerminalWriteAcknowledged = true;
       } catch {
-        // A failed or unknown commit must not be reported as accounted.
+        // A failed or unknown commit must not be followed by another Run write.
       }
     }
   }
@@ -299,13 +376,18 @@ async function finishStoppedRun(
     ReturnType<NonNullable<ReturnType<typeof connectDatabase>>["reserve"]>
   >,
   runId: string,
-): Promise<void> {
+  writeState: (unknown: boolean, acknowledged?: boolean) => void,
+): Promise<boolean> {
   await assertExecutorLock(session);
-  await session`
+  writeState(true);
+  const updated = await session<{ id: string }[]>`
     UPDATE runs SET finished_at = now(), outcome = 'stopped', summary = NULL
     WHERE id = ${runId}::uuid AND finished_at IS NULL
+    RETURNING id::text AS id
   `;
+  writeState(false, true);
   await assertExecutorLock(session);
+  return updated.length === 1;
 }
 
 export async function verifySavedPost(

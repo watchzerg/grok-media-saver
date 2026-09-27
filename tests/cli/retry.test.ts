@@ -109,6 +109,47 @@ test("SIGINT during Run completion returns 130 while keeping the committed succe
   }
 });
 
+test("SIGINT during a rejected Run insert does not claim a stopped Run was recorded", async () => {
+  await resetSchema();
+  await installRetryInsertFailureTrigger();
+  try {
+    const child = startCli(databaseEnv, ["retry"]);
+    expect(await waitForRetryDelay()).toBe(true);
+    child.kill("SIGINT");
+
+    const result = await collectCli(child);
+    expect(result.exitCode).toBe(130);
+    expect(result.stderr).not.toContain("Run 已记录停止结果");
+    const [run] = await testSql<{ id: string }[]>`
+      SELECT id FROM runs WHERE command = 'retry'
+    `;
+    expect(run).toBeUndefined();
+  } finally {
+    await dropRetryInsertFailureTrigger();
+  }
+});
+
+test("retry does not compensate after a failed Run completion write", async () => {
+  await resetSchema();
+  await installRetryFinishFailureTrigger();
+  try {
+    const result = await runCli(databaseEnv, ["retry"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("结果未知");
+    const [run] = await testSql<
+      { outcome: string | null; finished_at: Date | null }[]
+    >`SELECT outcome, finished_at FROM runs WHERE command = 'retry'`;
+    expect(run?.outcome).toBeNull();
+    expect(run?.finished_at).toBeNull();
+    const [attempts] = await testSql<{ lastValue: string }[]>`
+      SELECT last_value::text AS "lastValue" FROM retry_finish_attempt_seq
+    `;
+    expect(attempts?.lastValue).toBe("1");
+  } finally {
+    await dropRetryFinishFailureTrigger();
+  }
+});
+
 test("retry with unfinished work fails instead of reporting an empty success", async () => {
   await resetSchema();
   await testSql`
@@ -308,6 +349,51 @@ async function installRetryFinishDelayTrigger() {
     CREATE TRIGGER delay_retry_finish BEFORE UPDATE ON runs
     FOR EACH ROW WHEN (NEW.outcome = 'succeeded') EXECUTE FUNCTION delay_retry_finish()
   `);
+}
+
+async function installRetryInsertFailureTrigger() {
+  await testSql.unsafe(`
+    CREATE FUNCTION fail_retry_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      PERFORM pg_sleep(1);
+      RAISE EXCEPTION 'simulated Run insert failure';
+    END
+    $$
+  `);
+  await testSql.unsafe(`
+    CREATE TRIGGER fail_retry_insert BEFORE INSERT ON runs
+    FOR EACH ROW WHEN (NEW.command = 'retry') EXECUTE FUNCTION fail_retry_insert()
+  `);
+}
+
+async function dropRetryInsertFailureTrigger() {
+  await testSql.unsafe("DROP TRIGGER IF EXISTS fail_retry_insert ON runs");
+  await testSql.unsafe("DROP FUNCTION IF EXISTS fail_retry_insert()");
+}
+
+async function installRetryFinishFailureTrigger() {
+  await testSql.unsafe(`CREATE SEQUENCE retry_finish_attempt_seq START 1`);
+  await testSql.unsafe(`
+    CREATE FUNCTION fail_retry_finish() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      PERFORM nextval('retry_finish_attempt_seq');
+      IF NEW.outcome = 'succeeded' THEN
+        RAISE EXCEPTION 'simulated Run completion write failure';
+      END IF;
+      RETURN NEW;
+    END
+    $$
+  `);
+  await testSql.unsafe(`
+    CREATE TRIGGER fail_retry_finish BEFORE UPDATE ON runs
+    FOR EACH ROW WHEN (OLD.command = 'retry') EXECUTE FUNCTION fail_retry_finish()
+  `);
+}
+
+async function dropRetryFinishFailureTrigger() {
+  await testSql.unsafe("DROP TRIGGER IF EXISTS fail_retry_finish ON runs");
+  await testSql.unsafe("DROP FUNCTION IF EXISTS fail_retry_finish()");
+  await testSql.unsafe("DROP SEQUENCE IF EXISTS retry_finish_attempt_seq");
 }
 
 async function dropRetryFinishDelayTrigger() {
