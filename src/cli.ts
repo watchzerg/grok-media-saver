@@ -3,6 +3,7 @@ import {
   inspectSavedFirstPage,
   inspectSavedPost,
   readProjectStatus,
+  retryUnfinishedPosts,
   verifySavedPost,
 } from "./application-runtime";
 import {
@@ -15,7 +16,7 @@ import {
 import { normalizePostId } from "./grok/adapter";
 
 const usage =
-  "用法：grok-media-saver db init | status | verify <Post ID> | inspect first-page | inspect post <Post ID>";
+  "用法：grok-media-saver db init | status | retry | verify <Post ID> | inspect first-page | inspect post <Post ID>";
 
 type CliDependencies = {
   initializeProjectDatabase: typeof initializeProjectDatabase;
@@ -31,6 +32,7 @@ export async function main(
   const isDatabaseInit =
     args.length === 2 && args[0] === "db" && args[1] === "init";
   const isStatus = args.length === 1 && args[0] === "status";
+  const isRetry = args.length === 1 && args[0] === "retry";
   const isVerify = args.length === 2 && args[0] === "verify";
   const isPost =
     args.length === 3 && args[0] === "inspect" && args[1] === "post";
@@ -79,6 +81,20 @@ export async function main(
       for (const post of result.unfinishedPosts)
         console.log(`  ${post.postId}  ${post.status}`);
     }
+    if (result.status === "ok") console.log(result.message);
+    else console.error(result.message);
+    for (const error of result.cleanupErrors) console.error(error);
+    return result.status === "ok" ? 0 : 1;
+  }
+  if (isRetry) {
+    let config: DatabaseConfig;
+    try {
+      config = readDatabaseConfig(env);
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : "配置无效。");
+      return 2;
+    }
+    const result = await retryUnfinishedPosts(config);
     if (result.status === "ok") console.log(result.message);
     else console.error(result.message);
     for (const error of result.cleanupErrors) console.error(error);

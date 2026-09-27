@@ -41,6 +41,14 @@ mise exec -- bun src/cli.ts db init
 mise exec -- bun src/cli.ts status
 ```
 
+## 重试未完成 Post
+
+`retry` 只需要项目数据库配置。它通过 PostgreSQL 会话锁避免同一数据库上的并发写入；当前空集合可成功创建并收尾 Run，不连接浏览器。若数据库仍有未完成 Post，命令会明确失败，待后续实现完整重试处理。
+
+```sh
+mise exec -- bun src/cli.ts retry
+```
+
 ## 核验指定 Post 的本地文件
 
 `verify` 读取 PostgreSQL 中该 Post 的保存版本，并只在 `GROK_ARCHIVE_DIR` 当前目录下按记录的相对路径核对普通文件大小与 SHA-256。它不连接浏览器，不创建 Run，也不修复或改写保存状态。成功退出码为 `0`，核验异常为 `1`，参数或配置错误为 `2`。

@@ -5,6 +5,11 @@ import type { DatabaseConfig, InspectConfig, VerifyConfig } from "./config";
 import { checkArchiveFile } from "./files/verify";
 import { createRequestScheduler } from "./grok/request-scheduler";
 import { connectDatabase, safeDatabaseError } from "./store/database";
+import {
+  assertExecutorLock,
+  releaseExecutorLock,
+  tryAcquireExecutorLock,
+} from "./store/executor";
 import { initializeSchema, verifySchema } from "./store/schema";
 
 export type DatabaseResult = {
@@ -29,6 +34,8 @@ export type VerifyResult = {
   message: string;
   cleanupErrors: string[];
 };
+
+export type RetryResult = DatabaseResult;
 
 export type DatabaseCloser = (
   sql: SQL,
@@ -71,6 +78,126 @@ export function readProjectStatus(
   close: DatabaseCloser = closeDatabase,
 ): Promise<ProjectStatusResult> {
   return withStatusDatabase(config, close);
+}
+
+export async function retryUnfinishedPosts(
+  config: DatabaseConfig,
+  close: DatabaseCloser = closeDatabase,
+): Promise<RetryResult> {
+  let sql: ReturnType<typeof connectDatabase> | undefined;
+  let session:
+    | Awaited<ReturnType<NonNullable<typeof sql>["reserve"]>>
+    | undefined;
+  let lockAcquired = false;
+  let runId: string | undefined;
+  let result: RetryResult = {
+    status: "failed",
+    message: "重试执行失败。",
+    cleanupErrors: [],
+  };
+
+  try {
+    sql = connectDatabase(config);
+    await verifySchema(sql);
+    session = await sql.reserve();
+    lockAcquired = await tryAcquireExecutorLock(session);
+    if (!lockAcquired) {
+      result.message = "已有保存执行正在运行。";
+    } else {
+      await assertExecutorLock(session);
+      await session`
+        UPDATE runs
+        SET outcome = 'interrupted'
+        WHERE finished_at IS NULL
+      `;
+      await assertExecutorLock(session);
+      runId = crypto.randomUUID();
+      await session`
+        INSERT INTO runs (id, command, started_at)
+        VALUES (${runId}::uuid, 'retry', now())
+      `;
+      await assertExecutorLock(session);
+
+      const [pending] = await session<{ count: number }[]>`
+        SELECT count(*)::integer AS count FROM post_work WHERE status <> 'saved'
+      `;
+      await assertExecutorLock(session);
+      if ((pending?.count ?? 0) > 0) {
+        result.message = `重试失败：当前有 ${pending?.count ?? 0} 个未完成 Post，尚未实现非空重试。`;
+        await session`
+          UPDATE runs
+          SET finished_at = now(), outcome = 'failed'
+          WHERE id = ${runId}::uuid
+        `;
+        await assertExecutorLock(session);
+      } else {
+        await session`
+          UPDATE runs
+          SET finished_at = now(), outcome = 'succeeded',
+            summary = '{"saved":0,"failed":0,"unprocessed":0}'::jsonb
+          WHERE id = ${runId}::uuid
+        `;
+        await assertExecutorLock(session);
+        result = {
+          status: "ok",
+          message: "没有未完成 Post，重试 Run 已正常结束。",
+          cleanupErrors: [],
+        };
+      }
+    }
+  } catch (error) {
+    result.message = `重试执行失败：${safeDatabaseError(error, config)}`;
+    if (runId && session) {
+      try {
+        await assertExecutorLock(session);
+        await session`
+          UPDATE runs
+          SET finished_at = now(), outcome = 'failed'
+          WHERE id = ${runId}::uuid AND finished_at IS NULL
+        `;
+      } catch {
+        // A failed or unknown commit must not be reported as accounted.
+      }
+    }
+  }
+
+  if (session) {
+    if (lockAcquired) {
+      try {
+        await releaseExecutorLock(session);
+      } catch (error) {
+        result.cleanupErrors.push(
+          `执行器锁清理失败：${safeDatabaseError(error, config)}`,
+        );
+        if (result.status === "ok")
+          result.message = "重试 Run 已记录，但执行器锁清理失败。";
+        result.status = "failed";
+      }
+    }
+    try {
+      session.release();
+    } catch (error) {
+      result.cleanupErrors.push(
+        `执行器连接释放失败：${safeDatabaseError(error, config)}`,
+      );
+      if (result.status === "ok")
+        result.message = "重试 Run 已记录，但执行器连接释放失败。";
+      result.status = "failed";
+    }
+  }
+  if (sql) {
+    try {
+      await close(sql, 5);
+    } catch (error) {
+      result.cleanupErrors.push(
+        `数据库关闭失败：${safeDatabaseError(error, config)}`,
+      );
+      if (result.status === "ok")
+        result.message = "重试 Run 已记录，但数据库连接关闭失败。";
+      result.status = "failed";
+    }
+  }
+  return result;
 }
 
 export async function verifySavedPost(
