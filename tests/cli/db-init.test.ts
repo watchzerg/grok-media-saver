@@ -76,6 +76,32 @@ test("db init needs only database settings and reports database credentials safe
   expect(badPassword.stderr).not.toContain("different-secret-value");
 });
 
+test("db init reports a controlled close timeout through the real CLI process", async () => {
+  await testSql`DROP TABLE IF EXISTS media_versions, post_work, runs CASCADE`;
+  expect(
+    (await initializeProjectDatabase(readDatabaseConfig(databaseEnv))).status,
+  ).toBe("ok");
+
+  const result = await runCloseCli();
+  expect(result.exitCode).toBe(1);
+  expect(result.stdout).toContain("数据库初始化失败");
+  expect(result.stderr).toContain("数据库关闭失败：受控关闭超时");
+  expect(result.stderr).not.toContain("数据库结构已初始化");
+});
+
+test("db init keeps the primary error and reports an additional close error", async () => {
+  await testSql`DROP TABLE IF EXISTS media_versions, post_work, runs CASCADE`;
+  await testSql`CREATE TABLE runs (id integer PRIMARY KEY)`;
+
+  const result = await runCloseCli();
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain("数据库关闭失败：受控关闭超时");
+  expect(result.stderr).toContain("数据库结构与当前版本不一致");
+  expect(result.stdout).toContain("数据库初始化失败");
+
+  await testSql`DROP TABLE runs`;
+});
+
 test("Application checks schema without creating it and initializes no Run", async () => {
   await testSql`DROP TABLE IF EXISTS media_versions, post_work, runs CASCADE`;
   const config = readDatabaseConfig(databaseEnv);
@@ -125,6 +151,32 @@ test("schema declares unique Post identity and same Post digest constraints", as
     constraint_name: "media_versions_post_id_sha256_key",
     definition: "UNIQUE (post_id, sha256)",
   });
+
+  const postA = "00000000-0000-4000-8000-000000000001";
+  const postB = "00000000-0000-4000-8000-000000000002";
+  const versionA = "10000000-0000-4000-8000-000000000001";
+  const versionB = "10000000-0000-4000-8000-000000000002";
+  await testSql`INSERT INTO post_work (post_id, status) VALUES (${postA}, 'saved'), (${postB}, 'saved')`;
+  await testSql`
+    INSERT INTO media_versions (id, post_id, sha256, byte_count, mime_type, relative_path, saved_at)
+    VALUES (${versionA}, ${postA}, 'a', 1, 'image/png', 'a', now()),
+      (${versionB}, ${postB}, 'b', 1, 'image/png', 'b', now())
+  `;
+  const missingVersionError = await captureError(
+    () =>
+      testSql`UPDATE post_work SET saved_media_version_id = '20000000-0000-4000-8000-000000000001' WHERE post_id = ${postA}`,
+  );
+  expect(missingVersionError.message).toContain(
+    "post_work_saved_media_version_fkey",
+  );
+  const otherPostVersionError = await captureError(
+    () =>
+      testSql`UPDATE post_work SET saved_media_version_id = ${versionB} WHERE post_id = ${postA}`,
+  );
+  expect(otherPostVersionError.message).toContain(
+    "post_work_saved_media_version_fkey",
+  );
+  await testSql`UPDATE post_work SET saved_media_version_id = ${versionA} WHERE post_id = ${postA}`;
   await testSql`DROP TABLE media_versions, post_work, runs CASCADE`;
 });
 
@@ -144,4 +196,32 @@ async function runCli(env: Record<string, string>, args: string[]) {
     child.exited,
   ]);
   return { stdout, stderr, exitCode };
+}
+
+async function runCloseCli() {
+  const child = Bun.spawn(
+    [process.execPath, "--no-env-file", "tests/helpers/db-init-close-cli.ts"],
+    {
+      cwd: process.cwd(),
+      env: databaseEnv,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { stdout, stderr, exitCode };
+}
+
+async function captureError(operation: () => Promise<unknown>) {
+  try {
+    await operation();
+  } catch (error) {
+    if (error instanceof Error) return error;
+    throw new Error("Expected an Error instance.");
+  }
+  throw new Error("Expected the database operation to fail.");
 }

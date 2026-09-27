@@ -1,3 +1,4 @@
+import type { SQL } from "bun";
 import { inspectFirstPage, inspectPost } from "./application";
 import { connectBrowserSession } from "./browser/session";
 import type { DatabaseConfig, InspectConfig } from "./config";
@@ -11,27 +12,46 @@ export type DatabaseResult = {
   cleanupErrors: string[];
 };
 
+export type DatabaseCloser = (
+  sql: SQL,
+  timeoutSeconds: number,
+) => Promise<void>;
+
+const closeDatabase: DatabaseCloser = (sql, timeoutSeconds) =>
+  sql.close({ timeout: timeoutSeconds });
+
 export function initializeProjectDatabase(
   config: DatabaseConfig,
+  close: DatabaseCloser = closeDatabase,
 ): Promise<DatabaseResult> {
-  return withDatabase(config, async (sql) => {
-    await initializeSchema(sql);
-    return "数据库结构已初始化。";
-  });
+  return withDatabase(
+    config,
+    async (sql) => {
+      await initializeSchema(sql);
+      return "数据库结构已初始化。";
+    },
+    close,
+  );
 }
 
 export function checkProjectDatabase(
   config: DatabaseConfig,
+  close: DatabaseCloser = closeDatabase,
 ): Promise<DatabaseResult> {
-  return withDatabase(config, async (sql) => {
-    await verifySchema(sql);
-    return "数据库结构与当前版本一致。";
-  });
+  return withDatabase(
+    config,
+    async (sql) => {
+      await verifySchema(sql);
+      return "数据库结构与当前版本一致。";
+    },
+    close,
+  );
 }
 
 async function withDatabase(
   config: DatabaseConfig,
   operation: (sql: ReturnType<typeof connectDatabase>) => Promise<string>,
+  close: DatabaseCloser,
 ): Promise<DatabaseResult> {
   let sql: ReturnType<typeof connectDatabase> | undefined;
   let result: DatabaseResult = {
@@ -52,12 +72,13 @@ async function withDatabase(
   }
   if (sql) {
     try {
-      await sql.close({ timeout: 5 });
+      await close(sql, 5);
     } catch (error) {
       const detail = safeDatabaseError(error, config);
       result.cleanupErrors.push(`数据库关闭失败：${detail}`);
+      if (result.status === "ok")
+        result.message = "数据库操作已完成，但连接关闭失败。";
       result.status = "failed";
-      result.message = `${result.message} ${result.cleanupErrors.at(-1)}`;
     }
   }
   return result;

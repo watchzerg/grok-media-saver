@@ -14,9 +14,14 @@ import { normalizePostId } from "./grok/adapter";
 const usage =
   "用法：grok-media-saver db init | inspect first-page | inspect post <Post ID>";
 
+type CliDependencies = {
+  initializeProjectDatabase: typeof initializeProjectDatabase;
+};
+
 export async function main(
   args: string[],
   env: Record<string, string | undefined> = process.env,
+  dependencies: CliDependencies = { initializeProjectDatabase },
 ): Promise<number> {
   const isFirstPage =
     args.length === 2 && args[0] === "inspect" && args[1] === "first-page";
@@ -32,7 +37,7 @@ export async function main(
       console.error(error instanceof Error ? error.message : "配置无效。");
       return 2;
     }
-    const result = await initializeProjectDatabase(config);
+    const result = await dependencies.initializeProjectDatabase(config);
     console.log(result.status === "ok" ? result.message : "数据库初始化失败。");
     for (const error of result.cleanupErrors) console.error(error);
     if (result.status === "failed") console.error(result.message);

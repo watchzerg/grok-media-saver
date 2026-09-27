@@ -75,6 +75,10 @@ const schema: readonly Table[] = [
         "post_work_publish_intent_check",
         "CHECK ((publish_temp_name IS NULL) = (publish_relative_path IS NULL) AND (publish_temp_name IS NULL) = (publish_expected_bytes IS NULL) AND (publish_temp_name IS NULL) = (publish_sha256 IS NULL))",
       ],
+      [
+        "post_work_saved_media_version_fkey",
+        "FOREIGN KEY (post_id, saved_media_version_id) REFERENCES media_versions(post_id, id)",
+      ],
     ],
     create: `CREATE TABLE post_work (
       post_id text PRIMARY KEY,
@@ -110,6 +114,7 @@ const schema: readonly Table[] = [
     ],
     constraints: [
       ["media_versions_pkey", "PRIMARY KEY (id)"],
+      ["media_versions_post_id_id_key", "UNIQUE (post_id, id)"],
       ["media_versions_post_id_sha256_key", "UNIQUE (post_id, sha256)"],
       [
         "media_versions_post_id_fkey",
@@ -126,6 +131,7 @@ const schema: readonly Table[] = [
       mime_type text NOT NULL,
       relative_path text NOT NULL,
       saved_at timestamptz NOT NULL,
+      UNIQUE (post_id, id),
       UNIQUE (post_id, sha256)
     )`,
   },
@@ -139,6 +145,21 @@ export async function initializeSchema(sql: SQL): Promise<void> {
         SELECT to_regclass(${`public.${table.name}`}) IS NOT NULL AS exists
       `;
       if (!exists.exists) await tx.unsafe(table.create);
+    }
+    const [savedVersionConstraint] = await tx<{ exists: boolean }[]>`
+      SELECT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'post_work_saved_media_version_fkey'
+          AND conrelid = 'public.post_work'::regclass
+      ) AS exists
+    `;
+    if (!savedVersionConstraint.exists) {
+      await tx.unsafe(`
+        ALTER TABLE post_work
+        ADD CONSTRAINT post_work_saved_media_version_fkey
+        FOREIGN KEY (post_id, saved_media_version_id)
+        REFERENCES media_versions(post_id, id)
+      `);
     }
     await assertExistingTablesMatch(tx, false);
   });
