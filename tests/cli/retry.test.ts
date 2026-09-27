@@ -38,25 +38,74 @@ test("retry records a successful empty run without connecting to the browser", a
 
 test("competing retry subprocesses share one database lock regardless of archive root", async () => {
   await resetSchema();
-  const holder = await testSql.reserve();
+  await installRetryDelayTrigger();
+  const firstProcess = startCli(
+    { ...databaseEnv, GROK_ARCHIVE_DIR: "/tmp/archive-a" },
+    ["retry"],
+  );
   try {
-    const [acquired] = await holder<{ acquired: boolean }[]>`
-      SELECT pg_try_advisory_lock(1297043787, 1) AS acquired
-    `;
-    expect(acquired?.acquired).toBe(true);
-    const competing = await runCli(
+    expect(await waitForRetryDelay()).toBe(true);
+    const secondProcess = startCli(
       { ...databaseEnv, GROK_ARCHIVE_DIR: "/tmp/archive-b" },
       ["retry"],
     );
+    const competing = await collectCli(secondProcess);
+    const first = await collectCli(firstProcess);
     expect(competing.exitCode).toBe(1);
     expect(competing.stderr).toContain("已有保存执行正在运行");
+    expect(first.exitCode).toBe(0);
+    const afterRelease = await runCli(databaseEnv, ["retry"]);
+    expect(afterRelease.exitCode).toBe(0);
     const [count] = await testSql<{ count: number }[]>`
       SELECT count(*)::integer AS count FROM runs WHERE command = 'retry'
     `;
-    expect(count?.count).toBe(0);
+    expect(count?.count).toBe(2);
   } finally {
-    await holder`SELECT pg_advisory_unlock(1297043787, 1)`;
-    holder.release();
+    await dropRetryDelayTrigger();
+  }
+});
+
+test("SIGINT stops retry with exit 130 and records its Run before cleanup", async () => {
+  await resetSchema();
+  await installRetryDelayTrigger();
+  try {
+    const child = startCli(databaseEnv, ["retry"]);
+    expect(await waitForRetryDelay()).toBe(true);
+    child.kill("SIGINT");
+
+    const result = await collectCli(child);
+    expect(result.exitCode).toBe(130);
+    expect(result.stderr).toContain("Run 已记录停止结果");
+    const [run] = await testSql<
+      { finished_at: Date | null; outcome: string | null; summary: unknown }[]
+    >`SELECT finished_at, outcome, summary FROM runs`;
+    expect(run?.finished_at).toBeInstanceOf(Date);
+    expect(run?.outcome).toBe("stopped");
+    expect(run?.summary).toBeNull();
+  } finally {
+    await dropRetryDelayTrigger();
+  }
+});
+
+test("SIGINT during Run completion returns 130 while keeping the committed success", async () => {
+  await resetSchema();
+  await installRetryFinishDelayTrigger();
+  try {
+    const child = startCli(databaseEnv, ["retry"]);
+    expect(await waitForRetryDelay()).toBe(true);
+    child.kill("SIGINT");
+
+    const result = await collectCli(child);
+    expect(result.exitCode).toBe(130);
+    expect(result.stderr).toContain("停止信号");
+    const [run] = await testSql<
+      { finished_at: Date | null; outcome: string | null; summary: unknown }[]
+    >`SELECT finished_at, outcome, summary FROM runs`;
+    expect(run?.finished_at).toBeInstanceOf(Date);
+    expect(run?.outcome).toBe("succeeded");
+    expect(run?.summary).toEqual({ saved: 0, failed: 0, unprocessed: 0 });
+  } finally {
+    await dropRetryFinishDelayTrigger();
   }
 });
 
@@ -173,17 +222,113 @@ test("retry preserves its completed Run and reports an independent close failure
   expect(run?.outcome).toBe("succeeded");
 });
 
+test("stopped retry keeps exit classification and reports cleanup failure separately", async () => {
+  await resetSchema();
+  await installRetryDelayTrigger();
+  const controller = new AbortController();
+  try {
+    const resultPromise = retryUnfinishedPosts(
+      readDatabaseConfig(databaseEnv),
+      async (sql, timeoutSeconds) => {
+        await sql.close({ timeout: timeoutSeconds });
+        throw new Error("simulated stop cleanup failure");
+      },
+      controller.signal,
+    );
+    expect(await waitForRetryDelay()).toBe(true);
+    controller.abort();
+    const result = await resultPromise;
+
+    expect(result.status).toBe("cancelled");
+    expect(result.cleanupErrors).toEqual([
+      "数据库关闭失败：simulated stop cleanup failure",
+    ]);
+    const [run] = await testSql<{ outcome: string; summary: unknown }[]>`
+      SELECT outcome, summary FROM runs
+    `;
+    expect(run?.outcome).toBe("stopped");
+    expect(run?.summary).toBeNull();
+  } finally {
+    await dropRetryDelayTrigger();
+  }
+});
+
 async function runCli(env: Record<string, string>, args: string[]) {
-  const child = Bun.spawn(
-    [process.execPath, "--no-env-file", "src/cli.ts", ...args],
-    { cwd: process.cwd(), env, stdout: "pipe", stderr: "pipe" },
-  );
+  return collectCli(startCli(env, args));
+}
+
+function startCli(env: Record<string, string>, args: string[]) {
+  return Bun.spawn([process.execPath, "--no-env-file", "src/cli.ts", ...args], {
+    cwd: process.cwd(),
+    env,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+}
+
+async function collectCli(child: Bun.ReadableSubprocess) {
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
     child.exited,
   ]);
   return { stdout, stderr, exitCode };
+}
+
+async function installRetryDelayTrigger() {
+  await testSql.unsafe(`
+    CREATE FUNCTION delay_retry_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      PERFORM pg_sleep(1);
+      RETURN NEW;
+    END
+    $$
+  `);
+  await testSql.unsafe(`
+    CREATE TRIGGER delay_retry_insert BEFORE INSERT ON runs
+    FOR EACH ROW WHEN (NEW.command = 'retry') EXECUTE FUNCTION delay_retry_insert()
+  `);
+}
+
+async function dropRetryDelayTrigger() {
+  await testSql.unsafe("DROP TRIGGER IF EXISTS delay_retry_insert ON runs");
+  await testSql.unsafe("DROP FUNCTION IF EXISTS delay_retry_insert()");
+}
+
+async function installRetryFinishDelayTrigger() {
+  await testSql.unsafe(`
+    CREATE FUNCTION delay_retry_finish() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      PERFORM pg_sleep(1);
+      RETURN NEW;
+    END
+    $$
+  `);
+  await testSql.unsafe(`
+    CREATE TRIGGER delay_retry_finish BEFORE UPDATE ON runs
+    FOR EACH ROW WHEN (NEW.outcome = 'succeeded') EXECUTE FUNCTION delay_retry_finish()
+  `);
+}
+
+async function dropRetryFinishDelayTrigger() {
+  await testSql.unsafe("DROP TRIGGER IF EXISTS delay_retry_finish ON runs");
+  await testSql.unsafe("DROP FUNCTION IF EXISTS delay_retry_finish()");
+}
+
+async function waitForRetryDelay() {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const [activity] = await testSql<{ waiting: boolean }[]>`
+      SELECT EXISTS (
+        SELECT 1 FROM pg_stat_activity
+        WHERE datname = current_database() AND pid <> pg_backend_pid()
+          AND state = 'active' AND wait_event = 'PgSleep'
+      ) AS waiting
+    `;
+    if (activity?.waiting) return true;
+    await Bun.sleep(20);
+  }
+  return false;
 }
 
 async function resetSchema() {

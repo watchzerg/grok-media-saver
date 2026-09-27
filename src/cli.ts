@@ -94,11 +94,31 @@ export async function main(
       console.error(error instanceof Error ? error.message : "配置无效。");
       return 2;
     }
-    const result = await retryUnfinishedPosts(config);
-    if (result.status === "ok") console.log(result.message);
-    else console.error(result.message);
-    for (const error of result.cleanupErrors) console.error(error);
-    return result.status === "ok" ? 0 : 1;
+    const controller = new AbortController();
+    let stopCount = 0;
+    const stop = () => {
+      stopCount += 1;
+      if (stopCount === 1) controller.abort();
+      else {
+        console.error("已强制停止；Run 或数据库会话可能仍在收尾。");
+        process.exit(130);
+      }
+    };
+    process.on("SIGINT", stop);
+    try {
+      const result = await retryUnfinishedPosts(
+        config,
+        undefined,
+        controller.signal,
+      );
+      if (result.status === "ok") console.log(result.message);
+      else console.error(result.message);
+      for (const error of result.cleanupErrors) console.error(error);
+      if (result.status === "cancelled") return 130;
+      return result.status === "ok" ? 0 : 1;
+    } finally {
+      process.off("SIGINT", stop);
+    }
   }
   if (!isFirstPage && !isPost && !isVerify) {
     console.error(usage);

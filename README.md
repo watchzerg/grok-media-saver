@@ -43,7 +43,7 @@ mise exec -- bun src/cli.ts status
 
 ## 重试未完成 Post
 
-`retry` 只需要项目数据库配置。它通过 PostgreSQL 会话锁避免同一数据库上的并发写入；当前空集合可成功创建并收尾 Run，不连接浏览器。若数据库仍有未完成 Post，命令会明确失败，待后续实现完整重试处理。
+`retry` 只需要项目数据库配置。它通过 PostgreSQL 会话锁避免同一数据库上的并发写入；当前空集合可成功创建并收尾 Run，不连接浏览器。首次 Ctrl+C 会停止命令并以退出码 `130` 返回，已创建的 Run 会记为停止且数量未知。若数据库仍有未完成 Post，命令会明确失败，待后续实现完整重试处理。
 
 ```sh
 mise exec -- bun src/cli.ts retry
