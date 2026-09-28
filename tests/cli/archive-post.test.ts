@@ -1329,3 +1329,57 @@ test("P2-04 S1 遗留意图先精确核对，先持久removed再核验绑定文�
     archive_settled: true,
   });
 });
+
+test("P2-04 S1 认可GET之后丢锁保留远端观察，不改写待核对事实", async () => {
+  await seedPendingArchive();
+  const fake = checkOptions();
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    new AbortController().signal,
+    undefined,
+    async () => ({
+      ...(await fake.connect()),
+      checkPost: async (id: string) => {
+        const raw = await (await fake.connect()).checkPost(id);
+        await testSql`SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype='advisory' AND granted AND classid=1297043787::oid AND objid=1::oid`;
+        return raw;
+      },
+    }),
+  );
+  expect(result).toMatchObject({
+    status: "failed",
+    remoteObservation: "removed",
+    archiveRecorded: null,
+    fatalExecution: true,
+  });
+  expect(await work()).toMatchObject({
+    removal_state: "pending",
+    archive_settled: false,
+  });
+  expect(fake.requests).toEqual([`check:${postId}`]);
+});
+
+test("P2-04 S1 结清发送前停止不写入，保留removed未结清", async () => {
+  await seedPendingArchive();
+  const fake = checkOptions();
+  const controller = new AbortController();
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    controller.signal,
+    (stage) => {
+      if (stage === "提交恢复归档结清") controller.abort();
+    },
+    fake.connect,
+  );
+  expect(result).toMatchObject({
+    status: "cancelled",
+    remoteObservation: "removed",
+    archiveRecorded: false,
+  });
+  expect(await work()).toMatchObject({
+    removal_state: "removed",
+    archive_settled: false,
+  });
+});

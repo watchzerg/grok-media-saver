@@ -127,7 +127,12 @@ export async function archivePost({
     result.remoteObservation = "not-requested";
     result.archiveRecorded = false;
     if (work?.removalState && work.removalState !== "none") {
-      await recoverDeletion(work);
+      try {
+        await recoverDeletion(work);
+      } catch (error) {
+        result.fatalExecution = true;
+        result.message = `${result.remoteObservation === "removed" ? "远端已确认移除，归档未结清" : "移除结果未知，待核对"}；已停止：${error instanceof Error ? error.message : String(error)}`;
+      }
       return result;
     }
     await store.promoteArchiveWork?.();
@@ -295,8 +300,12 @@ export async function archivePost({
           result.status = "cancelled";
           return;
         }
+        if (observed.kind === "removed" || observed.kind === "present")
+          result.remoteObservation = observed.kind;
         await store.assertLock();
       } catch (error) {
+        if (result.remoteObservation === "removed")
+          result.archiveRecorded = null;
         result.status = signal.aborted ? "cancelled" : "failed";
         result.message += ` ${error instanceof Error ? error.message : String(error)}`;
         // 断连、取消收尾不确定或丢锁后停止推进；不改写 Post 工作事实。
@@ -363,6 +372,10 @@ export async function archivePost({
         return;
       }
       onStage?.("提交恢复归档结清");
+      if (signal.aborted) {
+        result.status = "cancelled";
+        return;
+      }
       await store.settleRecoveredArchive(versionId);
     } catch (error) {
       uncertainWrite(error, "恢复归档结清");
