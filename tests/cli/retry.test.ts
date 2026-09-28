@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readdir,
@@ -1790,6 +1791,97 @@ async function seedRetryArchives(root: string, ids: string[]) {
   await testSql`UPDATE post_work SET last_run_id=NULL`;
   await testSql`DELETE FROM runs`;
 }
+
+test.each(["权限故障", "内容冲突"])(
+  "P2 S2 已移除绑定文件%s按故障类别决定混合retry后项",
+  async (fault) => {
+    await resetSchema();
+    const root = await mkdtemp(join(tmpdir(), "gms-retry-bound-fault-"));
+    const events = join(root, "requests");
+    let boundPath: string | undefined;
+    try {
+      await seedRetryArchives(root, [retryFirst]);
+      await testSql`UPDATE post_work SET archive_settled=false WHERE post_id=${retryFirst}`;
+      await testSql`INSERT INTO post_work(post_id,goal,status) VALUES (${retrySecond},'save','pending')`;
+      const [firstBefore] =
+        await testSql`SELECT * FROM post_work WHERE post_id=${retryFirst}`;
+      const [secondBefore] =
+        await testSql`SELECT * FROM post_work WHERE post_id=${retrySecond}`;
+      const [version] = await testSql<{ relative_path: string }[]>`
+        SELECT relative_path FROM media_versions WHERE id=${firstBefore.deletion_media_version_id}::uuid`;
+      if (!version) throw new Error("缺少绑定文件 fixture。");
+      boundPath = join(root, version.relative_path);
+      if (fault === "权限故障") await chmod(boundPath, 0);
+      else await writeFile(boundPath, "保留冲突内容");
+
+      const result = await runFakeRetry({
+        ...databaseEnv,
+        GROK_ARCHIVE_DIR: root,
+        GMS_TEST_MEDIA: "1",
+        GMS_TEST_REQUEST_EVENTS: events,
+      });
+      expect(result.exitCode, JSON.stringify(result)).toBe(1);
+      expect(result.stderr).toContain(
+        fault === "权限故障" ? "绑定文件访问失败" : "绑定文件内容冲突或不符",
+      );
+      expect(result.stderr).toContain(
+        fault === "权限故障"
+          ? "保存完成 0，归档完成 0，已结清跳过 0，未确认完成 1，未处理 1"
+          : "保存完成 1，归档完成 0，已结清跳过 0，未确认完成 1，未处理 0",
+      );
+      expect(
+        (await testSql`SELECT * FROM post_work WHERE post_id=${retryFirst}`)[0],
+      ).toEqual(firstBefore);
+      if (fault === "权限故障") {
+        expect(
+          (
+            await testSql`SELECT * FROM post_work WHERE post_id=${retrySecond}`
+          )[0],
+        ).toEqual(secondBefore);
+        expect(await readdir(root)).not.toContain("requests");
+        expect(
+          (await testSql`SELECT finished_at,outcome FROM runs`)[0],
+        ).toEqual({ finished_at: null, outcome: null });
+        await chmod(boundPath, 0o600);
+        const recovered = await runFakeRetry({
+          ...databaseEnv,
+          GROK_ARCHIVE_DIR: root,
+          GMS_TEST_MEDIA: "1",
+          GMS_TEST_REQUEST_EVENTS: events,
+        });
+        expect(recovered.exitCode, JSON.stringify(recovered)).toBe(0);
+        expect(
+          (
+            await testSql`SELECT removal_state,archive_settled,deletion_media_version_id FROM post_work WHERE post_id=${retryFirst}`
+          )[0],
+        ).toEqual({
+          removal_state: "removed",
+          archive_settled: true,
+          deletion_media_version_id: firstBefore.deletion_media_version_id,
+        });
+      } else {
+        expect(await readFile(boundPath, "utf8")).toBe("保留冲突内容");
+        expect(
+          (
+            await testSql`SELECT status FROM post_work WHERE post_id=${retrySecond}`
+          )[0],
+        ).toEqual({ status: "saved" });
+      }
+      const requests = (await readFile(events, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(requests.length).toBeGreaterThan(0);
+      expect(requests.every((request) => request.postId === retrySecond)).toBe(
+        true,
+      );
+      expect(requests.some((request) => request.kind === "delete")).toBe(false);
+    } finally {
+      if (boundPath) await chmod(boundPath, 0o600);
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test("P2-08 S2 混合未知与已移除补救共用许可且普通失败后继续", async () => {
   await resetSchema();
