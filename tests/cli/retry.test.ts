@@ -1883,9 +1883,9 @@ test("P2 S1 已移除绑定文件新下载发布冲突后继续混合retry", asy
     expect(
       await readFile(join(root, retryFirst, String(after.publish_temp_name))),
     ).toEqual(bytes);
-    expect(
-      await testSql`SELECT * FROM media_versions WHERE post_id=${retryFirst}`,
-    ).toEqual([version]);
+    const versions =
+      await testSql`SELECT * FROM media_versions WHERE post_id=${retryFirst}`;
+    expect(versions).toEqual([version]);
     expect(
       (
         await testSql`SELECT status FROM post_work WHERE post_id=${retrySecond}`
@@ -1965,9 +1965,10 @@ test.each(["正式内容冲突", "临时内容冲突", "临时权限故障"])(
       ).toEqual(fault === "临时内容冲突" ? Buffer.from("保留临时冲突") : bytes);
       if (fault === "正式内容冲突")
         expect(await readFile(boundPath, "utf8")).toBe("保留正式冲突");
-      expect(
-        await testSql`SELECT relative_path,sha256,byte_count FROM media_versions WHERE post_id=${retryFirst}`,
-      ).toEqual([version]);
+      const versions = await testSql<
+        { relative_path: string; sha256: string; byte_count: string }[]
+      >`SELECT relative_path,sha256,byte_count FROM media_versions WHERE post_id=${retryFirst}`;
+      expect(versions).toEqual([version]);
       if (fatal) {
         expect(
           (
