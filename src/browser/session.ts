@@ -176,11 +176,17 @@ export async function connectBrowserSession(
     };
     signal.addEventListener("abort", abort, { once: true });
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let requestStarted = false;
+    let timedOut = false;
     try {
       if (signal.aborted) throw new Error(`归档已停止；未发起 ${method}。`);
       await beforeRequest?.();
       if (signal.aborted) throw new Error(`归档已停止；未发起 ${method}。`);
-      timer = setTimeout(abort, API_TIMEOUT_MS);
+      timer = setTimeout(() => {
+        timedOut = true;
+        abort();
+      }, API_TIMEOUT_MS);
+      requestStarted = true;
       onRequestStart();
       const raw = await Promise.race([
         deletePage.evaluate(
@@ -225,6 +231,19 @@ export async function connectBrowserSession(
           cause: closeError,
         });
       }
+      if (disconnected || error instanceof UnconfirmedStopError)
+        throw new UnconfirmedStopError(`${method} 请求停止无法确认。`, {
+          cause: error,
+        });
+      if (
+        requestStarted &&
+        !signal.aborted &&
+        (timedOut || isRetryableNetworkFailure(error))
+      )
+        throw new RetryableRequestError(
+          `${method} 请求发生网络错误或超时，已确认请求结束。`,
+          { cause: error },
+        );
       throw error;
     } finally {
       clearTimeout(timer);

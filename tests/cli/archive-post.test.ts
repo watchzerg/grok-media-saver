@@ -8,12 +8,16 @@ import {
   initializeProjectDatabase,
   saveSelectedPost,
 } from "../../src/application-runtime";
+import { savePost } from "../../src/application-save-post";
 import { readDatabaseConfig, readSaveConfig } from "../../src/config";
 import {
   parsePostDetailResponse,
   type RawCheckResponse,
   type RawDeleteResponse,
+  RetryableRequestError,
+  UnconfirmedStopError,
 } from "../../src/grok/adapter";
+import { createRequestScheduler } from "../../src/grok/request-scheduler";
 import { databaseEnv, testSql, useIsolatedPostgres } from "../helpers/postgres";
 
 useIsolatedPostgres();
@@ -970,11 +974,15 @@ test.each(["removed", "unknown"] as const)(
         postId,
         new AbortController().signal,
         undefined,
-        options(
-          observation === "unknown"
-            ? { raw: { body: { unexpected: true } } }
-            : {},
-        ).connect,
+        async () => ({
+          ...(await options(
+            observation === "unknown"
+              ? { raw: { body: { unexpected: true } } }
+              : {},
+          ).connect()),
+          checkPost: (await checkOptions({ status: 200, body: {} }).connect())
+            .checkPost,
+        }),
       );
       expect(result).toMatchObject({
         status: "failed",
@@ -1185,7 +1193,7 @@ async function signalDelete(twice: boolean) {
           .trim()
           .split("\n")
           .map((line) => JSON.parse(line).kind),
-      ).toEqual(["check"]);
+      ).toEqual(["check", "check"]);
     } else
       expect(await Bun.file(join(root, "next-requests")).exists()).toBe(false);
   } finally {
@@ -2029,4 +2037,253 @@ test("P2-05 S1 来源变化产生新内容，只绑定重新保存版本并保�
     "media",
     `delete:${postId}`,
   ]);
+});
+
+test("P2-06 S1 本次DELETE未知后精确GET确认移除并结清", async () => {
+  await seed();
+  const fake = checkOptions();
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    new AbortController().signal,
+    undefined,
+    async () => {
+      const browser = await fake.connect();
+      return {
+        ...browser,
+        deletePost: async (id: string) => ({
+          ...(await browser.deletePost(id)),
+          status: 503,
+        }),
+      };
+    },
+  );
+  expect(result).toMatchObject({
+    status: "ok",
+    remoteObservation: "removed",
+    archiveRecorded: true,
+  });
+  expect(fake.requests).toEqual([
+    `detail:${postId}`,
+    "media",
+    `delete:${postId}`,
+    `check:${postId}`,
+  ]);
+  expect(await work()).toMatchObject({
+    removal_state: "removed",
+    archive_settled: true,
+  });
+});
+
+test("P2-06 S1 两阶段各一次条件重试且共享非零许可，仍存在后无二次DELETE", async () => {
+  await seedPendingArchive();
+  const fake = checkOptions();
+  let checks = 0;
+  const starts: number[] = [];
+  const scheduler = createRequestScheduler({
+    minSeconds: 0.01,
+    maxSeconds: 0.01,
+  });
+  const markStarted = () => {
+    starts.push(Date.now());
+    scheduler.requestStarted();
+  };
+  const result = await savePost(config(), postId, {
+    goal: "archive",
+    waitBeforeRetry: scheduler.beforeRequest,
+    connect: async () => {
+      const browser = await fake.connect();
+      return {
+        ...browser,
+        getPostDetail: async (id: string) => {
+          markStarted();
+          return browser.getPostDetail(id);
+        },
+        deletePost: async (id: string) => {
+          markStarted();
+          return { ...(await browser.deletePost(id)), status: 503 };
+        },
+        checkPost: async (
+          id: string,
+          signal?: AbortSignal,
+          beforeRequest?: () => Promise<void>,
+        ) => {
+          markStarted();
+          const raw = await browser.checkPost(id, signal, beforeRequest);
+          checks += 1;
+          return checks === 1 || checks === 3
+            ? { ...raw, status: 503, body: {} }
+            : { ...raw, status: 200, body: { assetId: id, isDeleted: false } };
+        },
+      };
+    },
+  });
+  expect(result).toMatchObject({
+    status: "failed",
+    remoteObservation: "present",
+    archiveRecorded: false,
+  });
+  expect(fake.requests).toEqual([
+    `check:${postId}`,
+    `check:${postId}`,
+    `detail:${postId}`,
+    `delete:${postId}`,
+    `check:${postId}`,
+    `check:${postId}`,
+  ]);
+  expect(
+    starts.slice(1).every((time, index) => time - (starts[index] ?? time) >= 5),
+  ).toBe(true);
+  expect(await work()).toMatchObject({
+    removal_state: "none",
+    deletion_media_version_id: null,
+    archive_settled: false,
+  });
+});
+
+test.each([408, 500, 503, 599])(
+  "P2-06 S1 核对HTTP %s只条件重试一次并保留未知",
+  async (status) => {
+    await seedPendingArchive();
+    const before = await work();
+    const fake = checkOptions({ status, body: {} });
+    const result = await archiveSelectedPost(
+      config(),
+      postId,
+      new AbortController().signal,
+      undefined,
+      fake.connect,
+    );
+    expect(result).toMatchObject({
+      status: "failed",
+      remoteObservation: "unknown",
+      archiveRecorded: false,
+    });
+    expect(fake.requests).toEqual([`check:${postId}`, `check:${postId}`]);
+    expect(await work()).toEqual(before);
+  },
+);
+
+test.each([
+  { name: "未知结构", raw: { status: 200, body: {} }, expected: "failed" },
+  { name: "普通403", raw: { status: 403, body: {} }, expected: "failed" },
+  { name: "非认可404", raw: { status: 404, body: {} }, expected: "failed" },
+  { name: "认证", raw: { status: 401, body: {} }, expected: "blocked" },
+  { name: "限流", raw: { status: 429, body: {} }, expected: "blocked" },
+  {
+    name: "重定向5xx",
+    raw: { status: 503, body: {}, redirected: true },
+    expected: "failed",
+  },
+])("P2-06 S1 本次未知核对$name不重试", async ({ raw, expected }) => {
+  await seed();
+  const fake = checkOptions(raw);
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    new AbortController().signal,
+    undefined,
+    async () => {
+      const browser = await fake.connect();
+      return {
+        ...browser,
+        deletePost: async (id: string) => ({
+          ...(await browser.deletePost(id)),
+          status: 503,
+        }),
+      };
+    },
+  );
+  expect(result).toMatchObject({
+    status: expected,
+    remoteObservation: "unknown",
+  });
+  expect(
+    fake.requests.filter((request) => request.startsWith("check:")),
+  ).toHaveLength(1);
+  expect(
+    fake.requests.filter((request) => request.startsWith("delete:")),
+  ).toHaveLength(1);
+  expect(await work()).toMatchObject({
+    removal_state: "pending",
+    archive_settled: false,
+  });
+});
+
+test.each(["network", "unconfirmed", "generic", "stop"])(
+  "P2-06 S1 核对%s只有确认请求结束的网络错误可重试",
+  async (kind) => {
+    await seedPendingArchive();
+    const controller = new AbortController();
+    const fake = checkOptions();
+    let attempts = 0;
+    const result = await archiveSelectedPost(
+      config(),
+      postId,
+      controller.signal,
+      undefined,
+      async () => {
+        const browser = await fake.connect();
+        return {
+          ...browser,
+          checkPost: async (
+            id: string,
+            signal?: AbortSignal,
+            beforeRequest?: () => Promise<void>,
+          ) => {
+            const raw = await browser.checkPost(id, signal, beforeRequest);
+            attempts += 1;
+            if (attempts > 1) return raw;
+            if (kind === "stop") controller.abort();
+            if (kind === "network" || kind === "stop")
+              throw new RetryableRequestError("请求已结束的网络错误");
+            if (kind === "unconfirmed")
+              throw new UnconfirmedStopError("无法确认请求结束");
+            throw new Error("基础能力故障");
+          },
+        };
+      },
+    );
+    expect(attempts).toBe(kind === "network" ? 2 : 1);
+    expect(result.status).toBe(
+      kind === "network" ? "ok" : kind === "stop" ? "cancelled" : "failed",
+    );
+    expect(fake.requests.every((request) => request.startsWith("check:"))).toBe(
+      true,
+    );
+    expect(await work()).toMatchObject({
+      removal_state: kind === "network" ? "removed" : "pending",
+      archive_settled: kind === "network",
+    });
+  },
+);
+
+test("P2-06 S2 真实CLI本次未知GET确认移除与仍存在的退出和持久事实", async () => {
+  await seed();
+  const removed = await cli({
+    GMS_TEST_DELETE_STATUS: "503",
+    GMS_TEST_CHECK_STATUS: "404",
+    GMS_TEST_CHECK_BODY: JSON.stringify({
+      code: 5,
+      message: "Asset not found",
+    }),
+  });
+  expect(removed.exitCode, removed.stderr).toBe(0);
+  expect(await work()).toMatchObject({
+    removal_state: "removed",
+    archive_settled: true,
+  });
+  await seed();
+  const present = await cli({
+    GMS_TEST_DELETE_STATUS: "503",
+    GMS_TEST_CHECK_STATUS: "200",
+    GMS_TEST_CHECK_BODY: JSON.stringify({ assetId: postId, isDeleted: false }),
+  });
+  expect(present.exitCode, present.stderr).toBe(1);
+  expect(present.stderr).toContain("本 Run 不再 DELETE");
+  expect(await work()).toMatchObject({
+    removal_state: "none",
+    deletion_media_version_id: null,
+    archive_settled: false,
+  });
 });

@@ -284,6 +284,7 @@ async function runBatch(
             minSeconds: saveConfig?.requestIntervalMinSeconds ?? 0,
             maxSeconds: saveConfig?.requestIntervalMaxSeconds ?? 0,
           });
+          const requestBudgets: SavePostOptions["requestBudgets"] = new Map();
           const connectRunSession = async (connectSignal: AbortSignal) => {
             if (!saveConfig) throw new Error(`${label}缺少保存配置。`);
             runBrowserSession ??= await connectBrowserSession(
@@ -388,6 +389,7 @@ async function runBatch(
                       session,
                       {
                         signal,
+                        requestBudgets,
                         onStage,
                         waitBeforeRetry: scheduler.beforeRequest,
                         connect: connect ?? connectRunSession,

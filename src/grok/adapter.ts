@@ -264,7 +264,10 @@ export function parseDeleteResponse(
 export type RawCheckResponse = RawDeleteResponse & {
   authenticationUnreliable?: boolean;
 };
-export type CheckResponse = DeleteResponse | { kind: "present" };
+export type CheckResponse =
+  | DeleteResponse
+  | { kind: "present" }
+  | { kind: "temporary"; status: number };
 
 export function parseCheckResponse(
   postId: string,
@@ -280,6 +283,15 @@ export function parseCheckResponse(
       status: response.status,
       retryAfter: response.retryAfter,
     };
+  if (
+    !response.authenticationUnreliable &&
+    response.method === "GET" &&
+    !response.redirected &&
+    response.finalUrl === postAssetUrl(postId) &&
+    (response.status === 408 ||
+      (response.status >= 500 && response.status <= 599))
+  )
+    return { kind: "temporary", status: response.status };
   if (
     response.authenticationUnreliable ||
     response.method !== "GET" ||

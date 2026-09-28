@@ -14,6 +14,12 @@ import {
   RetryableMediaError,
 } from "./file-capabilities";
 
+export type ArchiveRequestBudget = {
+  deleteStarted: boolean;
+  recoveryStarted: boolean;
+  currentStarted: boolean;
+};
+
 type Store = {
   readWork(postId: string): Promise<Work | undefined>;
   startWork(postId: string, runId: string): Promise<void>;
@@ -74,7 +80,13 @@ export async function archivePost({
   goal = "save",
   deletePost,
   checkPost,
+  requestBudget = {
+    deleteStarted: false,
+    recoveryStarted: false,
+    currentStarted: false,
+  },
 }: {
+  requestBudget?: ArchiveRequestBudget;
   postId: string;
   goal?: "save" | "archive";
   checkPost?: (
@@ -133,7 +145,10 @@ export async function archivePost({
     result.archiveRecorded = false;
     if (work?.removalState && work.removalState !== "none") {
       try {
-        const continueSaving = await recoverDeletion(work);
+        const continueSaving = await recoverDeletion(
+          work,
+          requestBudget.deleteStarted,
+        );
         if (!continueSaving) return result;
       } catch (error) {
         result.fatalExecution = true;
@@ -257,6 +272,7 @@ export async function archivePost({
 
   async function recoverDeletion(
     boundWork: Work,
+    currentDelete = false,
   ): Promise<boolean | undefined> {
     const versionId = boundWork.deletionMediaVersionId;
     result.remoteObservation =
@@ -266,81 +282,95 @@ export async function archivePost({
       throw new Error("删除绑定记录无法确认，归档未完成。");
     if (boundWork.removalState === "pending") {
       if (!checkPost) throw new Error("浏览器会话不支持精确 Post 核对 GET。");
-      await waitBeforeRetry(signal);
-      await store.assertLock();
-      if (signal.aborted) {
-        result.status = "cancelled";
-        return;
-      }
-      const current = await store.readWork(postId);
-      if (
-        current?.removalState !== "pending" ||
-        current.deletionMediaVersionId !== versionId
-      )
-        throw new Error("核对前删除意图或绑定发生变化。");
-      onStage?.("核对精确 Post");
-      if (signal.aborted) {
-        result.status = "cancelled";
-        return;
-      }
-      const controller = new AbortController();
-      let rejectDeadline!: (error: Error) => void;
-      const deadline = new Promise<never>((_, reject) => {
-        rejectDeadline = reject;
-      });
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const beforeRequest = async () => {
+      const phase = currentDelete ? "currentStarted" : "recoveryStarted";
+      if (requestBudget[phase]) return;
+      requestBudget[phase] = true;
+      let observed: CheckResponse = { kind: "unknown" };
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        await waitBeforeRetry(signal);
         await store.assertLock();
-        if (signal.aborted) throw new Error("核对已停止；未发起 GET。");
-        const bound = await store.readWork(postId);
-        if (
-          bound?.removalState !== "pending" ||
-          bound.deletionMediaVersionId !== versionId
-        )
-          throw new Error("发送前核对绑定发生变化，未发起 GET。");
-        timer = setTimeout(() => {
-          controller.abort();
-          rejectDeadline(
-            new UnconfirmedStopError(
-              "核对 GET 超过 30 秒总期限；请求停止无法确认。",
-            ),
-          );
-        }, 30_000);
-      };
-      const abort = () => controller.abort();
-      signal.addEventListener("abort", abort, { once: true });
-      let observed: CheckResponse;
-      try {
-        observed = await Promise.race([
-          checkPost(postId, controller.signal, beforeRequest),
-          deadline,
-        ]);
         if (signal.aborted) {
           result.status = "cancelled";
           return;
         }
-        if (observed.kind === "removed" || observed.kind === "present")
-          result.remoteObservation = observed.kind;
-        await store.assertLock();
-      } catch (error) {
-        if (result.remoteObservation === "removed")
-          result.archiveRecorded = null;
-        result.status = signal.aborted ? "cancelled" : "failed";
-        const observationMessage =
-          result.remoteObservation === "removed"
-            ? "远端已确认移除，归档未结清；持久记账未确认"
-            : result.remoteObservation === "present"
-              ? "核对确认远端 Post 仍存在，归档未完成；保留原意图，本次不重发 DELETE"
-              : "移除结果未知，待核对";
-        result.message = `${observationMessage}；已停止：${error instanceof Error ? error.message : String(error)}`;
-        // 断连、取消收尾不确定或丢锁后停止推进；不改写 Post 工作事实。
-        result.fatalExecution = true;
-        if (error instanceof UnconfirmedStopError)
-          result.cleanupErrors.push(error.message);
-        return;
-      } finally {
-        clearTimeout(timer);
-        signal.removeEventListener("abort", abort);
+        const current = await store.readWork(postId);
+        if (
+          current?.removalState !== "pending" ||
+          current.deletionMediaVersionId !== versionId
+        )
+          throw new Error("核对前删除意图或绑定发生变化。");
+        onStage?.("核对精确 Post");
+        if (signal.aborted) {
+          result.status = "cancelled";
+          return;
+        }
+        const controller = new AbortController();
+        let rejectDeadline!: (error: Error) => void;
+        const deadline = new Promise<never>((_, reject) => {
+          rejectDeadline = reject;
+        });
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const beforeRequest = async () => {
+          await store.assertLock();
+          if (signal.aborted) throw new Error("核对已停止；未发起 GET。");
+          const bound = await store.readWork(postId);
+          if (
+            bound?.removalState !== "pending" ||
+            bound.deletionMediaVersionId !== versionId
+          )
+            throw new Error("发送前核对绑定发生变化，未发起 GET。");
+          timer = setTimeout(() => {
+            controller.abort();
+            rejectDeadline(
+              new UnconfirmedStopError(
+                "核对 GET 超过 30 秒总期限；请求停止无法确认。",
+              ),
+            );
+          }, 30_000);
+        };
+        const abort = () => controller.abort();
+        signal.addEventListener("abort", abort, { once: true });
+        try {
+          observed = await Promise.race([
+            checkPost(postId, controller.signal, beforeRequest),
+            deadline,
+          ]);
+          if (signal.aborted) {
+            result.status = "cancelled";
+            return;
+          }
+          if (observed.kind === "removed" || observed.kind === "present")
+            result.remoteObservation = observed.kind;
+          await store.assertLock();
+        } catch (error) {
+          if (error instanceof RetryableRequestError && !signal.aborted) {
+            await store.assertLock();
+            if (attempt < 2) continue;
+            result.message =
+              "核对 GET 的条件重试额度已用尽；移除结果未知，待核对。";
+            return;
+          }
+          if (result.remoteObservation === "removed")
+            result.archiveRecorded = null;
+          result.status = signal.aborted ? "cancelled" : "failed";
+          const observationMessage =
+            result.remoteObservation === "removed"
+              ? "远端已确认移除，归档未结清；持久记账未确认"
+              : result.remoteObservation === "present"
+                ? "核对确认远端 Post 仍存在，归档未完成；保留原意图，本次不重发 DELETE"
+                : "移除结果未知，待核对";
+          result.message = `${observationMessage}；已停止：${error instanceof Error ? error.message : String(error)}`;
+          // 断连、取消收尾不确定或丢锁后停止推进；不改写 Post 工作事实。
+          result.fatalExecution = true;
+          if (error instanceof UnconfirmedStopError)
+            result.cleanupErrors.push(error.message);
+          return;
+        } finally {
+          clearTimeout(timer);
+          signal.removeEventListener("abort", abort);
+        }
+        if (observed.kind === "temporary" && attempt < 2) continue;
+        break;
       }
       if (observed.kind === "present") {
         result.message =
@@ -362,6 +392,11 @@ export async function archivePost({
           return;
         }
         onStage?.("旧删除意图结清已提交");
+        if (currentDelete) {
+          result.message =
+            "核对确认远端 Post 仍存在，旧删除意图已结清，归档未完成；本 Run 不再 DELETE。";
+          return;
+        }
         return true;
       }
       if (observed.kind !== "removed") {
@@ -385,6 +420,24 @@ export async function archivePost({
         return;
       }
       onStage?.("移除确认已提交");
+    }
+    if (currentDelete) {
+      try {
+        await store.assertLock();
+        if (signal.aborted) {
+          result.status = "cancelled";
+          return;
+        }
+        await store.settleRecoveredArchive(versionId);
+      } catch (error) {
+        uncertainWrite(error, "归档结清");
+        return;
+      }
+      result.archiveRecorded = true;
+      result.status = "ok";
+      result.message =
+        "本次核对已确认远端移除，保存文件已有效核验，归档已结清。";
+      return;
     }
     result.message = "远端已确认移除，归档尚未结清；接续绑定版本核验。";
     if (signal.aborted) {
@@ -439,6 +492,10 @@ export async function archivePost({
   async function removeSavedPost(): Promise<void> {
     result.status = "failed";
     result.message = "Post 已保存，归档未完成；尚未发起移除。";
+    if (requestBudget.deleteStarted) {
+      result.message = "Post 已保存，归档未完成；本 Run 的 DELETE 额度已使用。";
+      return;
+    }
     if (!deletePost || !store.recordDeletionIntent || !store.settleArchive)
       throw new Error("浏览器会话不支持精确 Post DELETE。");
     if (signal.aborted) {
@@ -484,6 +541,7 @@ export async function archivePost({
       result.status = "cancelled";
       return;
     }
+    requestBudget.deleteStarted = true;
     result.remoteObservation = "unknown";
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -500,7 +558,7 @@ export async function archivePost({
       );
       rejectStop(new Error("DELETE 超过 30 秒总期限；移除结果未知，待核对。"));
     }, 30_000);
-    let parsed: DeleteResponse;
+    let parsed: DeleteResponse = { kind: "unknown" };
     try {
       parsed = await Promise.race([
         deletePost(postId, controller.signal),
@@ -508,9 +566,11 @@ export async function archivePost({
       ]);
     } catch (error) {
       result.status = signal.aborted ? "cancelled" : "failed";
-      result.fatalExecution = true;
       result.message = `Post 已保存，移除结果未知，待核对；归档未完成：${error instanceof Error ? error.message : String(error)}`;
-      return;
+      if (!(error instanceof RetryableRequestError) || signal.aborted) {
+        result.fatalExecution = true;
+        return;
+      }
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -520,6 +580,14 @@ export async function archivePost({
         parsed.kind === "blocked"
           ? `DELETE 被阻挡（HTTP ${parsed.status}）${parsed.retryAfter ? `；服务端建议等待 ${parsed.retryAfter}` : ""}；移除结果未知，待核对；Post 已保存，归档未完成。`
           : "DELETE 未取得认可响应；移除结果未知，待核对；Post 已保存，归档未完成。";
+      if (parsed.kind === "unknown" && !signal.aborted) {
+        try {
+          await recoverDeletion(bound, true);
+        } catch (error) {
+          result.fatalExecution = true;
+          result.message = `${result.message} 核对未完成；已停止：${error instanceof Error ? error.message : String(error)}`;
+        }
+      }
       return;
     }
     result.remoteObservation = "removed";

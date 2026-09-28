@@ -4,7 +4,7 @@ import {
   MediaCapabilityUnavailableError,
   type MediaSource,
 } from "./core/file-capabilities";
-import { archivePost } from "./core/post-archiver";
+import { type ArchiveRequestBudget, archivePost } from "./core/post-archiver";
 import { discardDownloadedTemp, downloadToTemp } from "./files/download";
 import { cleanupPublishedTemp, publishIntent } from "./files/publish-intent";
 import { checkArchiveFile } from "./files/verify";
@@ -72,6 +72,7 @@ export type SavePostOptions = {
   signal?: AbortSignal;
   goal?: "save" | "archive";
   onStage?: (stage: string) => void;
+  requestBudgets?: Map<string, ArchiveRequestBudget>;
 };
 
 export type SavePostResult = {
@@ -113,6 +114,17 @@ export async function archivePostInRun(
   onCleanupError: (message: string) => void,
 ): Promise<ArchivePostInRunResult> {
   const signal = options.signal ?? new AbortController().signal;
+  options.requestBudgets ??= new Map();
+  const budgets = options.requestBudgets;
+  let requestBudget = budgets.get(postId);
+  if (!requestBudget) {
+    requestBudget = {
+      deleteStarted: false,
+      recoveryStarted: false,
+      currentStarted: false,
+    };
+    budgets.set(postId, requestBudget);
+  }
   let browser: SavePostSession | undefined;
   let postResult: ArchivePostInRunResult | undefined;
   let saved = false;
@@ -124,6 +136,7 @@ export async function archivePostInRun(
   try {
     const archived = await archivePost({
       postId,
+      requestBudget,
       goal: options.goal,
       checkPost: async (id, checkSignal, beforeRequest) => {
         browser ??= await options.connect(checkSignal);
@@ -327,7 +340,7 @@ export async function savePost(
       postId,
       runId,
       session,
-      options,
+      { ...options, requestBudgets: new Map() },
       write,
       () => {
         result.saveRecorded = true;
