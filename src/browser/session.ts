@@ -27,6 +27,7 @@ const PLAYWRIGHT_EXTENSION_ID = "mmlmfjhmonkocbjadbfplnigmagldckm";
 export type BrowserSession = {
   getFirstPage(signal: AbortSignal): Promise<PageResponse>;
   getPostDetail(assetId: string, signal: AbortSignal): Promise<PostResponse>;
+  prepareMediaPage(signal: AbortSignal): Promise<void>;
   downloadMedia: MediaSource;
   checkPost(
     postId: string,
@@ -253,8 +254,76 @@ export async function connectBrowserSession(
 
   let listRouteInstalled = false;
 
+  async function prepareMediaPage(signal: AbortSignal): Promise<void> {
+    if (closed || disconnected)
+      throw new UnconfirmedStopError("Chrome Extension 连接已断开。");
+    if (signal.aborted) throw new Error("媒体准备已停止。");
+    if (page && !page.isClosed()) return;
+    // 本地空白工作页只建立 Grok origin，不加载详情或发起远端请求。
+    page = await context.newPage();
+    closingPage = undefined;
+    listRouteInstalled = false;
+    let rejectStopped!: (error: Error) => void;
+    const stopped = new Promise<never>((_, reject) => {
+      rejectStopped = reject;
+    });
+    void stopped.catch(() => {});
+    const abort = () => {
+      void closeOwnedPage().then(
+        () => rejectStopped(new Error("媒体准备已停止。")),
+        (error) =>
+          rejectStopped(
+            new UnconfirmedStopError("媒体准备停止无法确认。", {
+              cause: error,
+            }),
+          ),
+      );
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    try {
+      if (signal.aborted) throw new Error("媒体准备已停止。");
+      const shellUrl = "https://grok.com/";
+      await Promise.race([
+        page.route(shellUrl, async (route) => {
+          await route.fulfill({
+            status: 200,
+            contentType: "text/html",
+            body: "<!doctype html><title>Grok Media Saver</title>",
+          });
+        }),
+        stopped,
+      ]);
+      if (signal.aborted) throw new Error("媒体准备已停止。");
+      await Promise.race([
+        withTimeout(
+          page.goto(shellUrl, {
+            waitUntil: "domcontentloaded",
+            timeout: API_TIMEOUT_MS,
+          }),
+          API_TIMEOUT_MS,
+        ),
+        stopped,
+      ]);
+      if (signal.aborted) throw new Error("媒体准备已停止。");
+      if (closed || disconnected)
+        throw new UnconfirmedStopError("Chrome Extension 连接已断开。");
+    } catch (error) {
+      try {
+        await closeOwnedPage();
+      } catch (closeError) {
+        throw new UnconfirmedStopError("媒体准备停止无法确认。", {
+          cause: closeError,
+        });
+      }
+      throw error;
+    } finally {
+      signal.removeEventListener("abort", abort);
+    }
+  }
+
   return {
     cleanupNotices,
+    prepareMediaPage,
     cleanupBounded: true,
     isConnected: () => !closed && !disconnected,
     closePage: closeOwnedPage,
@@ -263,32 +332,7 @@ export async function connectBrowserSession(
       if (closed || disconnected)
         throw new UnconfirmedStopError("Chrome Extension 连接已断开。");
       if (signal.aborted) throw new Error("核对已停止。");
-      // 本地空白工作页只建立 Grok origin；不加载产品页，避免绕过许可的详情请求。
-      if (!page || page.isClosed()) {
-        page = await context.newPage();
-        closingPage = undefined;
-        listRouteInstalled = false;
-        const shellUrl = "https://grok.com/";
-        await page.route(shellUrl, async (route) => {
-          await route.fulfill({
-            status: 200,
-            contentType: "text/html",
-            body: "<!doctype html><title>Grok Media Saver</title>",
-          });
-        });
-        try {
-          await withTimeout(
-            page.goto(shellUrl, {
-              waitUntil: "domcontentloaded",
-              timeout: API_TIMEOUT_MS,
-            }),
-            API_TIMEOUT_MS,
-          );
-        } catch (error) {
-          await closeOwnedPage();
-          throw error;
-        }
-      }
+      await prepareMediaPage(signal);
       return requestAsset(postId, signal, "GET", beforeRequest);
     },
     async downloadMedia(selection, onResponse, onChunk, signal) {

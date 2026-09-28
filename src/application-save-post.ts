@@ -53,6 +53,8 @@ import { verifySchema } from "./store/schema";
 
 export type SavePostSession = {
   getPostDetail(postId: string, signal: AbortSignal): Promise<PostResponse>;
+  // 无工作页的媒体能力无需准备；浏览器能力在本地建立自建 origin 页。
+  prepareMediaPage?(signal: AbortSignal): Promise<void>;
   downloadMedia?: MediaSource;
   checkPost?(
     postId: string,
@@ -245,6 +247,9 @@ export async function archivePostInRun(
           throw new MediaCapabilityUnavailableError(
             "浏览器会话不支持媒体流传输。",
           );
+        await browser.prepareMediaPage?.(transferSignal);
+        await assertExecutorLock(session);
+        if (transferSignal.aborted) throw new Error("媒体下载已停止。");
         await browser.downloadMedia(
           selection,
           onResponse,

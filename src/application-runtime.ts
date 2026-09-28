@@ -300,6 +300,7 @@ async function runBatch(
                 browser.getFirstPage(requestSignal),
               getPostDetail: (postId: string, requestSignal: AbortSignal) =>
                 browser.getPostDetail(postId, requestSignal),
+              prepareMediaPage: browser.prepareMediaPage,
               downloadMedia: browser.downloadMedia,
               close: () => browser.closePage(),
             };

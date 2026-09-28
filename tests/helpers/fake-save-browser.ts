@@ -26,8 +26,14 @@ mock.module("../../src/browser/session.ts", () => ({
         );
     };
     let currentPostId = "";
+    let mediaPageReady = false;
     return {
+      prepareMediaPage: async (signal: AbortSignal) => {
+        if (signal.aborted) throw new Error("媒体下载已停止。");
+        mediaPageReady = true;
+      },
       getFirstPage: async () => {
+        mediaPageReady = true;
         recordRequest("page", "");
         const ids = (process.env.GMS_TEST_PAGE_IDS ?? "")
           .split(",")
@@ -52,6 +58,7 @@ mock.module("../../src/browser/session.ts", () => ({
         });
       },
       getPostDetail: async (postId: string) => {
+        mediaPageReady = true;
         currentPostId = postId;
         recordRequest("detail", postId);
         attempts += 1;
@@ -113,6 +120,8 @@ mock.module("../../src/browser/session.ts", () => ({
               onResponse: (headers: unknown) => Promise<void>,
               onChunk: (chunk: Uint8Array) => Promise<void>,
             ) => {
+              if (!mediaPageReady)
+                throw new Error("媒体请求需要已确认的 Post 页面。");
               recordRequest("media", currentPostId);
               mediaAttempts += 1;
               if (
@@ -173,6 +182,7 @@ mock.module("../../src/browser/session.ts", () => ({
         signal: AbortSignal,
         beforeRequest: () => Promise<void>,
       ) => {
+        mediaPageReady = true;
         await beforeRequest();
         recordRequest("check", postId);
         if (process.env.GMS_TEST_CHECK_DELAY_MS) {
@@ -217,6 +227,7 @@ mock.module("../../src/browser/session.ts", () => ({
       },
       isConnected: () => connected,
       closePage: async () => {
+        mediaPageReady = false;
         recordBrowser("close-page");
         attempts = 0;
         mediaAttempts = 0;

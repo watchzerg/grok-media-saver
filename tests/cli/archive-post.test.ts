@@ -250,10 +250,16 @@ function options(
   } = {},
 ) {
   const requests: string[] = [];
+  let mediaPageReady = false;
   return {
     requests,
     connect: async () => ({
+      prepareMediaPage: async (signal: AbortSignal) => {
+        if (signal.aborted) throw new Error("媒体下载已停止。");
+        mediaPageReady = true;
+      },
       getPostDetail: async (id: string) => {
+        mediaPageReady = true;
         requests.push(`detail:${id}`);
         return parsePostDetailResponse(id, {
           status: 200,
@@ -278,6 +284,8 @@ function options(
         }) => Promise<void>,
         onChunk: (chunk: Uint8Array) => Promise<void>,
       ) => {
+        if (!mediaPageReady)
+          throw new Error("媒体请求需要已确认的 Post 页面。");
         requests.push("media");
         await onResponse({
           status: 200,
@@ -2662,6 +2670,47 @@ test.each(["丢锁", "断连"])(
       remoteObservation: "removed",
     });
     expect(fake.requests).toEqual([]);
+    expect(await work()).toMatchObject({
+      removal_state: "removed",
+      archive_settled: false,
+      deletion_media_version_id: before?.deletion_media_version_id,
+    });
+  },
+);
+
+test.each(["停止", "丢锁", "准备失败"])(
+  "P2-07 S1 本地媒体页准备时%s不发媒体请求且保留绑定",
+  async (kind) => {
+    const { before, path } = await seedRemovedMissing();
+    const fake = options();
+    const controller = new AbortController();
+    let closed = false;
+    const result = await archiveSelectedPost(
+      config(),
+      postId,
+      controller.signal,
+      undefined,
+      async () => {
+        const browser = await fake.connect();
+        return {
+          ...browser,
+          prepareMediaPage: async () => {
+            if (kind === "停止") controller.abort();
+            else if (kind === "丢锁")
+              await testSql`SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype='advisory' AND granted AND classid=1297043787::oid AND objid=1::oid`;
+            else throw new Error("媒体工作页准备失败");
+          },
+          close: async () => {
+            closed = true;
+            await browser.close();
+          },
+        };
+      },
+    );
+    expect(result.status).toBe(kind === "停止" ? "cancelled" : "failed");
+    expect(fake.requests).toEqual([]);
+    expect(closed).toBe(true);
+    expect(await Bun.file(path).exists()).toBe(false);
     expect(await work()).toMatchObject({
       removal_state: "removed",
       archive_settled: false,
