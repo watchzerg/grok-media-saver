@@ -88,8 +88,32 @@ export async function main(
       if (result.status === "ok") console.log("没有未完成 Post。");
     } else {
       console.log(`当前未完成 Post（${result.unfinishedPosts.length}）：`);
-      for (const post of result.unfinishedPosts)
-        console.log(`  ${post.postId}  ${post.status}`);
+      for (const post of result.unfinishedPosts) {
+        const settled =
+          post.goal === "archive"
+            ? post.archiveSettled
+              ? "已结清"
+              : "未结清"
+            : "不适用";
+        console.log(
+          `  ${post.postId}  目标：${post.goal}  保存：${post.status}  移除：${post.removalState}  结清：${settled}  最近错误：${post.lastError ?? "无"}`,
+        );
+        if (post.removalState === "pending") {
+          console.log(
+            `    恢复提示：先核对远端，再运行 archive post ${post.postId} 或 retry。`,
+          );
+        } else if (post.removalState === "removed" && !post.archiveSettled) {
+          console.log(
+            `    恢复提示：运行 archive post ${post.postId} 或 retry，接续绑定版本的本地核验或补救。`,
+          );
+        } else {
+          const command =
+            post.goal === "archive" ? "archive post" : "save post";
+          console.log(
+            `    恢复提示：运行 ${command} ${post.postId} 或 retry。`,
+          );
+        }
+      }
     }
     if (result.status === "ok") console.log(result.message);
     else console.error(result.message);

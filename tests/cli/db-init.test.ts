@@ -288,7 +288,7 @@ test("status reports database facts without changing them or needing other resou
   expect(result.stdout).toContain(postIds[1]);
   expect(result.stdout).toContain(postIds[2]);
   expect(result.stdout).not.toContain(postIds[3]);
-  expect(result.stdout).not.toContain("HTTP 404");
+  expect(result.stdout).toContain("最近错误：HTTP 404");
   expect(result.stdout).not.toContain("崩溃时间");
   expect(result.stderr).toBe("");
   expect(after).toEqual(before);
@@ -325,6 +325,111 @@ test("status reports saved run summary and fails safely when the database is una
   expect(unavailable.stderr).not.toContain("status-secret");
 });
 
+test("P2-09 S1/S2 status reports unfinished archive facts and safe recovery hints", async () => {
+  expect(
+    (await initializeProjectDatabase(readDatabaseConfig(databaseEnv))).status,
+  ).toBe("ok");
+  await testSql`DELETE FROM post_work`;
+  await testSql`DELETE FROM runs`;
+  const pendingSave = "10000000-0000-4000-8000-000000000020";
+  const settledSave = "10000000-0000-4000-8000-000000000021";
+  const savedArchive = "10000000-0000-4000-8000-000000000022";
+  const pendingRemoval = "10000000-0000-4000-8000-000000000023";
+  const settledArchive = "10000000-0000-4000-8000-000000000024";
+  const removedArchive = "10000000-0000-4000-8000-000000000025";
+  const versions = [
+    "20000000-0000-4000-8000-000000000020",
+    "20000000-0000-4000-8000-000000000021",
+    "20000000-0000-4000-8000-000000000022",
+    "20000000-0000-4000-8000-000000000023",
+  ];
+  await testSql`
+    INSERT INTO post_work (post_id, goal, status, removal_state, archive_settled,
+      deletion_media_version_id, saved_media_version_id, last_error)
+    VALUES
+      (${pendingSave}, 'save', 'failed', 'none', false, NULL, NULL, 'HTTP 503'),
+      (${settledSave}, 'save', 'saved', 'none', false, NULL, NULL, NULL),
+      (${savedArchive}, 'archive', 'saved', 'none', false, NULL, NULL, '归档等待移除'),
+      (${pendingRemoval}, 'archive', 'saved', 'none', false, NULL, NULL, 'DELETE 回执未知'),
+      (${settledArchive}, 'archive', 'saved', 'none', false, NULL, NULL, NULL),
+      (${removedArchive}, 'archive', 'saved', 'none', false, NULL, NULL, '本地文件待核验')
+  `;
+  await testSql`
+    INSERT INTO media_versions (id, post_id, sha256, byte_count, mime_type, relative_path, saved_at)
+    VALUES
+      (${versions[0]}, ${savedArchive}, ${"a".repeat(64)}, 12, 'image/png', 'saved-archive.png', now()),
+      (${versions[1]}, ${pendingRemoval}, ${"b".repeat(64)}, 13, 'image/png', 'pending-removal.png', now()),
+      (${versions[2]}, ${settledArchive}, ${"c".repeat(64)}, 14, 'image/png', 'settled-archive.png', now()),
+      (${versions[3]}, ${removedArchive}, ${"d".repeat(64)}, 15, 'image/png', 'removed-archive.png', now())
+  `;
+  await testSql`
+    UPDATE post_work SET saved_media_version_id = ${versions[0]}
+    WHERE post_id = ${savedArchive}
+  `;
+  await testSql`
+    UPDATE post_work SET removal_state = 'pending', deletion_media_version_id = ${versions[1]},
+      saved_media_version_id = ${versions[1]}
+    WHERE post_id = ${pendingRemoval}
+  `;
+  await testSql`
+    UPDATE post_work SET removal_state = 'removed', archive_settled = true,
+      deletion_media_version_id = ${versions[2]}, saved_media_version_id = ${versions[2]}
+    WHERE post_id = ${settledArchive}
+  `;
+  await testSql`
+    UPDATE post_work SET removal_state = 'removed',
+      deletion_media_version_id = ${versions[3]}, saved_media_version_id = ${versions[3]}
+    WHERE post_id = ${removedArchive}
+  `;
+  await testSql`
+    INSERT INTO runs (id, command, started_at, finished_at, outcome, summary)
+    VALUES ('00000000-0000-4000-8000-000000000020', 'archive-post', now(), now(), 'failed', NULL)
+  `;
+
+  const before = await readPersistedFacts();
+  const application = await readProjectStatus(readDatabaseConfig(databaseEnv));
+  const result = await runCli(
+    { ...databaseEnv, GROK_ARCHIVE_ROOT: undefined },
+    ["status"],
+  );
+  const after = await readPersistedFacts();
+
+  expect(application.status).toBe("ok");
+  expect(application.latestRun?.outcome).toBe("failed");
+  expect(application.unfinishedPosts.map((post) => post.postId)).toEqual([
+    pendingSave,
+    savedArchive,
+    pendingRemoval,
+    removedArchive,
+  ]);
+  expect(
+    application.unfinishedPosts.find((post) => post.postId === savedArchive),
+  ).toMatchObject({
+    goal: "archive",
+    status: "saved",
+    archiveSettled: false,
+  });
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(result.stdout).toContain("最近 Run：archive-post");
+  expect(result.stdout).toContain("结果：failed");
+  expect(result.stdout).toContain(pendingSave);
+  expect(result.stdout).toContain(savedArchive);
+  expect(result.stdout).toContain(pendingRemoval);
+  expect(result.stdout).toContain(removedArchive);
+  expect(result.stdout).not.toContain(settledSave);
+  expect(result.stdout).not.toContain(settledArchive);
+  expect(result.stdout).toContain("目标：archive");
+  expect(result.stdout).toContain("保存：saved");
+  expect(result.stdout).toContain("移除：pending");
+  expect(result.stdout).toContain("结清：未结清");
+  expect(result.stdout).toContain("最近错误：DELETE 回执未知");
+  expect(result.stdout).toContain("先核对远端");
+  expect(result.stdout).toContain("绑定版本的本地核验或补救");
+  expect(result.stdout).toContain("文件待核验");
+  expect(result.stderr).toBe("");
+  expect(after).toEqual(before);
+});
+
 test("status reports a database close failure after reading the status", async () => {
   const result = await readProjectStatus(
     readDatabaseConfig(databaseEnv),
@@ -345,8 +450,9 @@ async function readPersistedFacts() {
     FROM runs ORDER BY id
   `;
   const work = await testSql<unknown[]>`
-    SELECT post_id, status, last_run_id, last_error, publish_temp_name,
-      publish_relative_path, publish_expected_bytes, publish_sha256
+    SELECT post_id, goal, status, removal_state, archive_settled,
+      deletion_media_version_id, saved_media_version_id, last_run_id, last_error,
+      publish_temp_name, publish_relative_path, publish_expected_bytes, publish_sha256
     FROM post_work ORDER BY post_id
   `;
   return { runs, work };

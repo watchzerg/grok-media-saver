@@ -44,7 +44,14 @@ export type ProjectStatusResult = DatabaseResult & {
     outcome: string | null;
     summary: Record<string, unknown> | null;
   } | null;
-  unfinishedPosts: { postId: string; status: string }[];
+  unfinishedPosts: {
+    postId: string;
+    goal: "save" | "archive";
+    status: string;
+    removalState: "none" | "pending" | "removed";
+    archiveSettled: boolean;
+    lastError: string | null;
+  }[];
 };
 
 export type VerifyResult = {
@@ -760,9 +767,12 @@ async function withStatusDatabase(
       LIMIT 1
     `;
     const unfinishedPosts = await sql<ProjectStatusResult["unfinishedPosts"]>`
-      SELECT post_id AS "postId", status
+      SELECT post_id AS "postId", goal, status,
+        removal_state AS "removalState", archive_settled AS "archiveSettled",
+        last_error AS "lastError"
       FROM post_work
-      WHERE status <> 'saved'
+      WHERE (goal = 'save' AND status <> 'saved')
+        OR (goal = 'archive' AND NOT archive_settled)
       ORDER BY post_id
     `;
     result = {
