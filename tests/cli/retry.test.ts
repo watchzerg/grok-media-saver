@@ -1484,40 +1484,42 @@ async function resetSchema() {
   ).toBe("ok");
 }
 
-test("P2-01 S2 混合 retry 不降级 archive 或遗漏已保存未结清工作", async () => {
+test("P2-08 S2 混合retry固定选择未完成目标并串行保存或归档", async () => {
   await resetSchema();
   const root = await mkdtemp(join(tmpdir(), "gms-retry-goals-"));
   const events = join(root, "events");
-  const ids = [
-    "123e4567-e89b-42d3-a456-426614174000",
-    "123e4567-e89b-42d3-a456-426614174001",
-    "123e4567-e89b-42d3-a456-426614174002",
-    "123e4567-e89b-42d3-a456-426614174003",
-  ];
+  const browserEvents = join(root, "browser-events");
+  const ids = Array.from(
+    { length: 5 },
+    (_, i) => `123e4567-e89b-42d3-a456-42661417400${i}`,
+  );
   try {
-    await testSql`INSERT INTO post_work (post_id, goal, status, archive_settled, last_error)
-      VALUES (${ids[0]}, 'archive', 'pending', false, '保留现场'),
-      (${ids[1]}, 'archive', 'saved', false, '等待结清'),
-      (${ids[2]}, 'archive', 'saved', false, null),
-      (${ids[3]}, 'save', 'pending', false, null)`;
+    await testSql`INSERT INTO post_work (post_id, goal, status)
+      VALUES (${ids[0]}, 'archive', 'pending'), (${ids[1]}, 'archive', 'saved'),
+      (${ids[2]}, 'archive', 'saved'), (${ids[3]}, 'save', 'pending'), (${ids[4]}, 'save', 'saved')`;
+    await seedSettledArchive(testSql, ids[1] as string);
+    await testSql`UPDATE post_work SET archive_settled=false, removal_state='none', deletion_media_version_id=NULL WHERE post_id=${ids[1]}`;
     await seedSettledArchive(testSql, ids[2] as string);
-    const before =
-      await testSql`SELECT * FROM post_work WHERE goal = 'archive' ORDER BY post_id`;
+    const excluded =
+      await testSql`SELECT * FROM post_work WHERE post_id IN (${ids[2]}, ${ids[4]}) ORDER BY post_id`;
     const result = await runFakeRetry({
       ...databaseEnv,
       GROK_ARCHIVE_DIR: root,
       GMS_TEST_MEDIA: "1",
       GMS_TEST_REQUEST_EVENTS: events,
+      GMS_TEST_BROWSER_EVENTS: browserEvents,
     });
-    expect(result.exitCode, result.stderr).toBe(1);
-    expect(result.stderr).toContain("未处理 2");
-    expect(result.stderr).toContain(ids[1] ?? "");
-    const after =
-      await testSql`SELECT * FROM post_work WHERE goal = 'archive' ORDER BY post_id`;
-    expect(after).toEqual(before);
-    const [saved] =
-      await testSql`SELECT goal, status FROM post_work WHERE post_id = ${ids[3]}`;
-    expect(saved).toEqual({ goal: "save", status: "saved" });
+    expect(result.exitCode, JSON.stringify(result)).toBe(0);
+    const rows =
+      await testSql`SELECT goal, status, archive_settled FROM post_work WHERE post_id IN (${ids[0]},${ids[1]},${ids[3]}) ORDER BY post_id`;
+    expect(rows).toEqual([
+      { goal: "archive", status: "saved", archive_settled: true },
+      { goal: "archive", status: "saved", archive_settled: true },
+      { goal: "save", status: "saved", archive_settled: false },
+    ]);
+    expect(
+      await testSql`SELECT * FROM post_work WHERE post_id IN (${ids[2]}, ${ids[4]}) ORDER BY post_id`,
+    ).toEqual(excluded);
     expect(
       (await readFile(events, "utf8"))
         .trim()
@@ -1526,11 +1528,27 @@ test("P2-01 S2 混合 retry 不降级 archive 或遗漏已保存未结清工作"
           const request = JSON.parse(line);
           return `${request.kind}:${request.postId}`;
         }),
-    ).toEqual([`detail:${ids[3]}`, `media:${ids[3]}`]);
+    ).toEqual([
+      `detail:${ids[0]}`,
+      `media:${ids[0]}`,
+      `delete:${ids[0]}`,
+      `detail:${ids[1]}`,
+      `media:${ids[1]}`,
+      `delete:${ids[1]}`,
+      `detail:${ids[3]}`,
+      `media:${ids[3]}`,
+    ]);
+    expect((await readFile(browserEvents, "utf8")).trim().split("\n")).toEqual([
+      "connect",
+      "close-page",
+      "close-page",
+      "close-page",
+      "close",
+    ]);
     const [run] = await testSql`SELECT outcome, summary FROM runs`;
     expect(run).toEqual({
-      outcome: "failed",
-      summary: { saved: 1, failed: 0, unprocessed: 2 },
+      outcome: "succeeded",
+      summary: { saved: 3, failed: 0, unprocessed: 0 },
     });
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -248,8 +248,8 @@ async function runBatch(
         } else {
           let targets =
             command === "retry"
-              ? await session<{ postId: string }[]>`
-            SELECT post_id AS "postId" FROM post_work
+              ? await session<{ postId: string; goal: "save" | "archive" }[]>`
+            SELECT post_id AS "postId", goal FROM post_work
             WHERE (goal = 'save' AND status IN ('pending', 'finalizing', 'failed'))
               OR (goal = 'archive' AND NOT archive_settled)
             ORDER BY post_id
@@ -300,6 +300,8 @@ async function runBatch(
                 browser.getFirstPage(requestSignal),
               getPostDetail: (postId: string, requestSignal: AbortSignal) =>
                 browser.getPostDetail(postId, requestSignal),
+              checkPost: browser.checkPost,
+              deletePost: browser.deletePost,
               prepareMediaPage: browser.prepareMediaPage,
               downloadMedia: browser.downloadMedia,
               close: () => browser.closePage(),
@@ -363,6 +365,7 @@ async function runBatch(
                 if (page.status === "ok") {
                   targets = page.assets.map((asset) => ({
                     postId: asset.assetId,
+                    goal: "save" as const,
                   }));
                   counts.unprocessed = targets.length;
                   countsKnown = true;
@@ -390,6 +393,7 @@ async function runBatch(
                       session,
                       {
                         signal,
+                        goal: target.goal,
                         requestBudgets,
                         onStage,
                         waitBeforeRetry: scheduler.beforeRequest,
