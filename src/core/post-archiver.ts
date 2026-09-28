@@ -131,7 +131,7 @@ export async function archivePost({
         await recoverDeletion(work);
       } catch (error) {
         result.fatalExecution = true;
-        result.message = `${result.remoteObservation === "removed" ? "远端已确认移除，归档未结清" : "移除结果未知，待核对"}；已停止：${error instanceof Error ? error.message : String(error)}`;
+        result.message = `${result.message} 归档恢复未完成；已停止：${error instanceof Error ? error.message : String(error)}`;
       }
       return result;
     }
