@@ -326,6 +326,53 @@ test("verify retains its primary failure when database close also fails", async 
   }
 });
 
+test("P2-10 Application 在数据库关闭失败时保留已完成核验事实", async () => {
+  const archiveRoot = await mkdtemp(
+    join(tmpdir(), "gms-verify-success-close-db-"),
+  );
+  const relativePath = `${postId}/${digest}.png`;
+  const filePath = join(archiveRoot, relativePath);
+  const versionId = "223e4567-e89b-42d3-a456-426614174000";
+  await mkdir(join(archiveRoot, postId), { recursive: true });
+  await writeFile(filePath, contents);
+  await seedVersion(relativePath);
+  await testSql`
+    UPDATE post_work SET goal = 'archive', status = 'saved', removal_state = 'removed',
+      archive_settled = true, deletion_media_version_id = ${versionId}
+    WHERE post_id = ${postId}
+  `;
+
+  try {
+    const before = await readVerifyFacts();
+    const result = await verifySavedPost(
+      readVerifyConfig({ ...databaseEnv, GROK_ARCHIVE_DIR: archiveRoot }),
+      postId,
+      async (sql) => {
+        await sql.close({ timeout: 5 });
+        throw new Error("simulated close failure");
+      },
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.message).toContain(versionId);
+    expect(result.message).toContain(filePath);
+    expect(result.message).toContain("数据库已记录归档结清");
+    expect(result.message).toContain("文件核验通过");
+    expect(result.cleanupErrors).toHaveLength(1);
+    expect(result.cleanupErrors[0]).toContain("数据库关闭失败");
+    expect(result).toMatchObject({
+      versionId,
+      filePath,
+      fileStatus: "ok",
+      archiveSettled: true,
+    });
+    expect(await readVerifyFacts()).toEqual(before);
+    expect(await Bun.file(filePath).bytes()).toEqual(contents);
+  } finally {
+    await rm(archiveRoot, { recursive: true, force: true });
+  }
+});
+
 test("verify reports an archive file close failure", async () => {
   const archiveRoot = await mkdtemp(join(tmpdir(), "gms-verify-close-file-"));
   const relativePath = `${postId}/valid.bin`;

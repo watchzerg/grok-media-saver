@@ -791,8 +791,6 @@ export async function verifySavedPost(
       result.cleanupErrors.push(
         `数据库关闭失败：${safeDatabaseError(error, config)}`,
       );
-      if (result.status === "ok")
-        result.message = "文件核验已完成，但数据库连接关闭失败。";
       result.status = "failed";
     }
   }
