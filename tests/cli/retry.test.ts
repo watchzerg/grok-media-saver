@@ -19,7 +19,10 @@ import {
   PublishConflictError,
   publishIntent,
 } from "../../src/files/publish-intent";
-import { UnconfirmedStopError } from "../../src/grok/adapter";
+import {
+  parsePostDetailResponse,
+  UnconfirmedStopError,
+} from "../../src/grok/adapter";
 import { databaseEnv, testSql, useIsolatedPostgres } from "../helpers/postgres";
 import { seedSettledArchive } from "../helpers/seed-settled-archive";
 
@@ -2053,6 +2056,116 @@ test.each(["阻挡", "停止"])(
         true,
       );
       expect(requests.some((request) => request.kind === "check")).toBe(false);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test.each([
+  ...["断连", "停止不确定", "丢锁", "认证", "限流"].map((fault) => ({
+    fault,
+    failCleanup: false,
+  })),
+  { fault: "断连", failCleanup: true },
+])(
+  "P2-12 S1 DELETE阶段 $fault 清理失败=$failCleanup 阻止混合retry后项",
+  async ({ fault, failCleanup }) => {
+    await resetSchema();
+    const root = await mkdtemp(join(tmpdir(), "gms-retry-delete-fault-"));
+    try {
+      await seedRetryArchives(root, [retryFirst]);
+      await testSql`UPDATE post_work SET archive_settled=false, removal_state='none', deletion_media_version_id=NULL WHERE post_id=${retryFirst}`;
+      await testSql`INSERT INTO post_work(post_id,goal,status) VALUES (${retrySecond},'save','failed')`;
+      const before =
+        await testSql`SELECT * FROM post_work WHERE post_id=${retrySecond}`;
+      const requests: string[] = [];
+      const cleanup: string[] = [];
+      const result = await retryUnfinishedPosts(
+        readDatabaseConfig(databaseEnv),
+        async (sql, timeout) => {
+          cleanup.push("database");
+          await sql.close({ timeout });
+          if (failCleanup) throw new Error("模拟独立DB关闭失败");
+        },
+        new AbortController().signal,
+        () =>
+          readSaveConfig({
+            ...databaseEnv,
+            GROK_ARCHIVE_DIR: root,
+            PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+            GROK_API_INTERVAL_MIN_SECONDS: "0",
+            GROK_API_INTERVAL_MAX_SECONDS: "0",
+          }),
+        async () => ({
+          getPostDetail: async (id) => {
+            requests.push(`detail:${id}`);
+            return parsePostDetailResponse(id, {
+              status: 200,
+              contentType: "application/json",
+              finalPath: `/rest/assets/${id}`,
+              body: {
+                assetId: id,
+                key: "https://assets.grok.com/source.png",
+                mimeType: "image/png",
+              },
+            });
+          },
+          checkPost: async (id) => {
+            requests.push(`check:${id}`);
+            throw new Error("故障后不应追加核对");
+          },
+          deletePost: async (id) => {
+            requests.push(`delete:${id}`);
+            if (fault === "断连") throw new Error("模拟浏览器断连");
+            if (fault === "停止不确定")
+              throw new UnconfirmedStopError("模拟请求停止不确定");
+            if (fault === "丢锁")
+              await testSql`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND pid IN (SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted)`;
+            return {
+              status: fault === "认证" ? 401 : fault === "限流" ? 429 : 200,
+              contentType: "application/json",
+              body: {},
+              finalUrl: `https://grok.com/rest/assets/${id}`,
+              method: "DELETE",
+              redirected: false,
+              retryAfter: "60",
+            };
+          },
+          close: async () => {
+            cleanup.push("browser");
+            if (failCleanup) throw new Error("模拟独立连接关闭失败");
+          },
+        }),
+      );
+      expect(result.status).not.toBe("ok");
+      expect(requests).toEqual([
+        `detail:${retryFirst}`,
+        `delete:${retryFirst}`,
+      ]);
+      expect(
+        await testSql`SELECT * FROM post_work WHERE post_id=${retrySecond}`,
+      ).toEqual(before);
+      const [first] =
+        await testSql`SELECT removal_state,archive_settled FROM post_work WHERE post_id=${retryFirst}`;
+      expect(first).toEqual({
+        removal_state: "pending",
+        archive_settled: false,
+      });
+      expect(cleanup).toEqual(["browser", "database"]);
+      if (failCleanup) {
+        expect(result.cleanupErrors).toHaveLength(2);
+        expect(result.cleanupErrors.join(" ")).toContain(
+          "模拟独立连接关闭失败",
+        );
+        expect(result.cleanupErrors.join(" ")).toContain("模拟独立DB关闭失败");
+      } else if (fault !== "丢锁") expect(result.cleanupErrors).toEqual([]);
+      if (fault === "认证" || fault === "限流")
+        expect(result.message).toContain("被阻挡");
+      const [run] = await testSql`SELECT outcome FROM runs`;
+      expect(run?.outcome).toBe(
+        fault === "认证" || fault === "限流" ? "failed" : null,
+      );
     } finally {
       await rm(root, { recursive: true, force: true });
     }

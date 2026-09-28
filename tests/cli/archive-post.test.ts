@@ -590,6 +590,22 @@ test.each(["intent", "settle"])(
       await testSql`DROP TRIGGER reject_archive_write ON post_work`;
       await testSql`DROP FUNCTION reject_archive_write()`;
     }
+    const nextEvents = join(root, "restart-requests");
+    const next = await cli({
+      ...removedCheckEnv,
+      GMS_TEST_REQUEST_EVENTS: nextEvents,
+    });
+    expect(next.exitCode, JSON.stringify(next)).toBe(0);
+    expect(
+      (await readFile(nextEvents, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line).kind),
+    ).toEqual(stage === "intent" ? ["detail", "delete"] : ["check"]);
+    expect(await work()).toMatchObject({
+      removal_state: "removed",
+      archive_settled: true,
+    });
   },
 );
 
@@ -1702,6 +1718,26 @@ test.each(["confirm", "recovered"])(
       await testSql`DROP TRIGGER reject_recovery_write ON post_work`;
       await testSql`DROP FUNCTION reject_recovery_write()`;
     }
+    const nextEvents = join(root, "restart-requests");
+    const next = await cli({
+      ...removedCheckEnv,
+      GMS_TEST_REQUEST_EVENTS: nextEvents,
+    });
+    expect(next.exitCode, JSON.stringify(next)).toBe(0);
+    expect(await work()).toMatchObject({
+      removal_state: "removed",
+      archive_settled: true,
+    });
+    if (stage === "confirm") {
+      expect(
+        (await readFile(nextEvents, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line).kind),
+      ).toEqual(["check"]);
+    } else {
+      expect(await Bun.file(nextEvents).exists()).toBe(false);
+    }
   },
 );
 
@@ -1916,7 +1952,22 @@ test("P2-05 S2 旧意图结清未提交，保留绑定且无详情或DELETE追�
     await testSql`DROP TRIGGER reject_present_write ON post_work`;
     await testSql`DROP FUNCTION reject_present_write()`;
   }
-  expect((await cli(presentCheckEnv)).exitCode).toBe(0);
+  const nextEvents = join(root, "restart-requests");
+  const next = await cli({
+    ...presentCheckEnv,
+    GMS_TEST_REQUEST_EVENTS: nextEvents,
+  });
+  expect(next.exitCode, JSON.stringify(next)).toBe(0);
+  expect(
+    (await readFile(nextEvents, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line).kind),
+  ).toEqual(["check", "detail", "delete"]);
+  expect(await work()).toMatchObject({
+    removal_state: "removed",
+    archive_settled: true,
+  });
 });
 
 test.each(["changed", "missing", "conflict", "detail-failed", "finalizing"])(
@@ -2733,4 +2784,157 @@ test.each(["停止", "丢锁", "准备失败"])(
       deletion_media_version_id: before?.deletion_media_version_id,
     });
   },
+);
+
+test.each([
+  {
+    stage: "保存结果已提交",
+    pending: false,
+    removal: "none",
+    settled: false,
+    first: ["detail", "media"],
+    next: ["detail", "delete"],
+  },
+  {
+    stage: "删除意图已提交",
+    pending: false,
+    removal: "pending",
+    settled: false,
+    first: ["detail", "media"],
+    next: ["check"],
+  },
+  {
+    stage: "远端已确认移除",
+    pending: false,
+    removal: "pending",
+    settled: false,
+    first: ["detail", "media", "delete"],
+    next: ["check"],
+  },
+  {
+    stage: "移除确认已提交",
+    pending: true,
+    removal: "removed",
+    settled: false,
+    first: ["check"],
+    next: [],
+  },
+  {
+    stage: "恢复归档结清已提交",
+    pending: true,
+    removal: "removed",
+    settled: true,
+    first: ["check"],
+    next: [],
+  },
+  {
+    stage: "归档结清已提交",
+    pending: false,
+    removal: "removed",
+    settled: true,
+    first: ["detail", "media", "delete"],
+    next: [],
+  },
+])(
+  "P2-12 S2 $stage 真实SIGKILL后依据持久事实接续",
+  async (window) => {
+    const root = window.pending ? await seedPendingArchive() : await seed();
+    const marker = join(root, "crash-marker");
+    const events = join(root, "crash-requests");
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        "--no-env-file",
+        "--preload",
+        "./tests/helpers/fake-save-browser.ts",
+        "--preload",
+        "./tests/helpers/pause-save-stage.ts",
+        "src/cli.ts",
+        "archive",
+        "post",
+        postId,
+      ],
+      {
+        env: {
+          ...databaseEnv,
+          ...removedCheckEnv,
+          GROK_ARCHIVE_DIR: root,
+          PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+          GROK_API_INTERVAL_MIN_SECONDS: "0",
+          GROK_API_INTERVAL_MAX_SECONDS: "0",
+          GMS_TEST_MEDIA: "1",
+          GMS_TEST_REQUEST_EVENTS: events,
+          GMS_TEST_STOP_STAGE: window.stage,
+          GMS_TEST_STAGE_MARKER: marker,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const output = Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    try {
+      const deadline = Date.now() + 5000;
+      while (!(await Bun.file(marker).exists()) && Date.now() < deadline)
+        await Bun.sleep(10);
+      expect(await Bun.file(marker).exists()).toBe(true);
+      const before = await work();
+      expect(before).toMatchObject({
+        status: "saved",
+        removal_state: window.removal,
+        archive_settled: window.settled,
+      });
+      expect(
+        (await readFile(events, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line).kind),
+      ).toEqual([...window.first]);
+      process.kill(child.pid, "SIGKILL");
+      await child.exited;
+      await output;
+      const nextEvents = join(root, "restart-requests");
+      const resumed = await cli({
+        ...removedCheckEnv,
+        GMS_TEST_REQUEST_EVENTS: nextEvents,
+      });
+      expect(resumed.exitCode, JSON.stringify(resumed)).toBe(0);
+      const requests = (await Bun.file(nextEvents).exists())
+        ? (await readFile(nextEvents, "utf8"))
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line))
+        : [];
+      expect(requests.map((item) => item.kind)).toEqual([...window.next]);
+      expect(requests.every((item) => item.postId === postId)).toBe(true);
+      const recovered = await work();
+      expect(recovered).toMatchObject({
+        removal_state: "removed",
+        archive_settled: true,
+      });
+      expect(recovered?.saved_media_version_id).toBe(
+        before?.saved_media_version_id,
+      );
+      expect(recovered?.deletion_media_version_id).toBe(
+        before?.saved_media_version_id,
+      );
+      if (window.settled) expect(recovered).toEqual(before);
+      const runs = await testSql<
+        { outcome: string }[]
+      >`SELECT outcome FROM runs ORDER BY started_at DESC LIMIT 2`;
+      expect(runs.map((run) => run.outcome)).toEqual([
+        "succeeded",
+        "interrupted",
+      ]);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        process.kill(child.pid, "SIGKILL");
+        await child.exited;
+      }
+      await output;
+    }
+  },
+  20_000,
 );
