@@ -161,6 +161,7 @@ async function runBatch(
   let runTerminalWriteAcknowledged = false;
   let runWriteUnknown = false;
   let invalidConfig = false;
+  let fatalExecution = false;
   let saveConfig: SaveConfig | undefined;
   let runBrowserSession: BrowserSession | undefined;
   const counts = { saved: 0, failed: 0, unprocessed: 0 };
@@ -435,6 +436,11 @@ async function runBatch(
                     ].join(" ");
                     break;
                   }
+                  if (browserResult.fatalExecution) {
+                    fatalExecution = true;
+                    result.cleanupErrors.push(...browserResult.cleanupErrors);
+                    throw new Error(browserResult.message);
+                  }
                   if (browserResult.unprocessed) {
                     postErrors.push(
                       `Post ${target.postId}：${browserResult.message}`,
@@ -527,6 +533,7 @@ async function runBatch(
         runCreated &&
         !runTerminalWriteAcknowledged &&
         !runWriteUnknown &&
+        !fatalExecution &&
         session
       ) {
         try {
@@ -559,6 +566,7 @@ async function runBatch(
       runCreated &&
       !runTerminalWriteAcknowledged &&
       !runWriteUnknown &&
+      !fatalExecution &&
       session
     ) {
       try {

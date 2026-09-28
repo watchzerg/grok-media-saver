@@ -19,6 +19,7 @@ import {
   PublishConflictError,
   publishIntent,
 } from "../../src/files/publish-intent";
+import { UnconfirmedStopError } from "../../src/grok/adapter";
 import { databaseEnv, testSql, useIsolatedPostgres } from "../helpers/postgres";
 import { seedSettledArchive } from "../helpers/seed-settled-archive";
 
@@ -1554,3 +1555,76 @@ test("P2-08 S2 混合retry固定选择未完成目标并串行保存或归档", 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+const retryFirst = "123e4567-e89b-42d3-a456-426614174000";
+const retrySecond = "123e4567-e89b-42d3-a456-426614174001";
+
+test.each(["断连", "停止不确定", "丢锁"])(
+  "P2-08 S1 核对%s停止整个Run并保留后项",
+  async (fault) => {
+    await resetSchema();
+    const root = await mkdtemp(join(tmpdir(), "gms-retry-fatal-"));
+    try {
+      await testSql`INSERT INTO post_work (post_id,goal,status) VALUES (${retryFirst},'archive','saved'),(${retrySecond},'save','pending')`;
+      await seedSettledArchive(testSql, retryFirst);
+      await testSql`UPDATE post_work SET archive_settled=false, removal_state='pending' WHERE post_id=${retryFirst}`;
+      const before = await testSql`SELECT * FROM post_work ORDER BY post_id`;
+      const requests: string[] = [];
+      let pageClosed = false;
+      let databaseClosed = false;
+      const result = await retryUnfinishedPosts(
+        readDatabaseConfig(databaseEnv),
+        async (sql, timeout) => {
+          await sql.close({ timeout });
+          databaseClosed = true;
+        },
+        undefined,
+        () =>
+          readSaveConfig({
+            ...databaseEnv,
+            GROK_ARCHIVE_DIR: root,
+            PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+            GROK_API_INTERVAL_MIN_SECONDS: "0",
+            GROK_API_INTERVAL_MAX_SECONDS: "0",
+          }),
+        async () => ({
+          getPostDetail: async (id) => {
+            requests.push(`detail:${id}`);
+            return { kind: "unavailable" as const, status: 404 };
+          },
+          checkPost: async (id) => {
+            requests.push(`check:${id}`);
+            if (fault === "停止不确定")
+              throw new UnconfirmedStopError("模拟无法确认请求停止");
+            if (fault === "丢锁") {
+              await testSql`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND pid IN (SELECT pid FROM pg_locks WHERE locktype='advisory' AND granted)`;
+              return {
+                status: 404,
+                contentType: "application/json",
+                body: { code: 5, message: "Asset not found" },
+                finalUrl: `https://grok.com/rest/assets/${id}`,
+                method: "GET",
+                redirected: false,
+              };
+            }
+            throw new Error("模拟浏览器断连");
+          },
+          close: async () => {
+            pageClosed = true;
+          },
+        }),
+      );
+      expect(result.status).toBe("failed");
+      expect(requests).toEqual([`check:${retryFirst}`]);
+      expect(await testSql`SELECT * FROM post_work ORDER BY post_id`).toEqual(
+        before,
+      );
+      expect(pageClosed).toBe(true);
+      expect(databaseClosed).toBe(true);
+      const [run] = await testSql`SELECT finished_at, outcome FROM runs`;
+      expect(run).toEqual({ finished_at: null, outcome: null });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
