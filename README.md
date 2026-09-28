@@ -63,6 +63,18 @@ mise exec -- bun src/cli.ts status
 mise exec -- bun src/cli.ts retry
 ```
 
+## 归档指定 Post
+
+`archive post <Post-ID>` 为一个精确 Post 启动新的 Run，先核验保存版本和当前归档目录中的正式文件，再提交绑定该版本的删除意图，最后才请求移除。它复用已安全保存的文件；纯 `save` 命令不会发起 DELETE。已结清 Post 直接跳过。
+
+```sh
+mise exec -- bun src/cli.ts archive post <Post-ID>
+```
+
+命令需要当前 schema 的项目数据库、归档目录和 Playwright Extension 配置。同一账号应贯穿本次处理及之后的显式恢复；程序不验证账号身份。待核对删除意图再次执行 `archive post` 或 `retry` 时先核对同一 Post，不会因未知结果盲目重发；认可仍存在后，本 Run 最多发起一次新的 DELETE。远端已移除而文件缺失或冲突时保留移除事实，恢复的文件必须符合原删除依据版本。
+
+首次 Ctrl+C 禁止新请求，在途 DELETE 只在原 30 秒期限内收集响应；已确认事实仍会记账并以 `130` 退出。期限到达或请求停止状态不确定时保留待核对意图。第二次 Ctrl+C 强制退出。完整契约见[二期规格](docs/specs/phase2-archiving.md)及[运行与恢复指南](docs/development/phase1-runbook.md)。
+
 ## 保存指定 Post
 
 `save post <Post-ID>` 每次启动新的 Run；对于纯保存工作，即使该 Post 已是 `saved`，也先核对已有 `finalizing` 意图，再读取当前详情。来源和当前 `GROK_ARCHIVE_DIR` 内已保存文件的大小、SHA-256 均匹配时复用，且不重新下载；文件缺失或来源、适用元数据变化时重新下载。文件访问或权限错误会停止本次下载，保留现有工作事实。需要新文件时通过 Chrome Extension 对所选媒体发起一次完整 GET，将响应流写入当前目录的临时文件。只有 HTTP 200、可信长度、类型及文件头、完整 EOF、实写和重读核验通过，才记录意图并无覆盖发布；Grok 将 JPEG 错标为 PNG 的已知情况按实际 JPEG 类型和 `.jpg` 扩展名保存。冲突保留现场，不覆盖目标文件；再次保存失败保留原成功版本记录，原文件已存在且未受损时也保留原文件。普通暂时失败最多重试一次，重试前重读详情。
@@ -106,6 +118,7 @@ mise exec -- bun src/cli.ts inspect post <Post-ID>
 - [一期可靠保存规格](docs/specs/phase1-saving.md)：一期行为、持久事实、恢复及测试边界。
 - [一期开发者运行与恢复](docs/development/phase1-runbook.md)：安装、配置、命令、核验与中断接续。
 - [一期验收记录](docs/research/phase1-acceptance.md)：正式浏览器与本地边界的证据、限制。
+- [二期交付覆盖核对](docs/research/phase2-acceptance.md)：40 条用户故事、7 组自动化矩阵及现场未验证范围。
 - [实现路线图](docs/development/implementation-roadmap.md)：三期范围、依赖、风险验证时点与结束标准。
 - [详细文档索引](docs/INDEX.md)：文档分类、权威来源与维护规则。
 - [Beads 约定](docs/agents/issue-tracker.md)：issue 和 spec 的操作入口。

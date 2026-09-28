@@ -2,7 +2,7 @@
 
 状态：已确认的整体路线。确认日期：2026-09-25。
 
-本路线图服务于[产品目标与首版范围](../specs/product-goals.md)，以[架构设计](../../ARCHITECTURE.md)为契约。本文记录各期范围、依赖、风险验证时点和结束标准，不表示功能已实现。一期具体契约见[一期可靠保存规格](../specs/phase1-saving.md)，二期见[单 Post 完整归档规格](../specs/phase2-archiving.md)；tickets 与验收记录以 Beads 为入口。
+本路线图服务于[产品目标与首版范围](../specs/product-goals.md)，以[架构设计](../../ARCHITECTURE.md)为契约。本文记录各期范围、依赖、风险验证时点和结束标准，不作为实现或验收证据；二期当前实现与自动化覆盖见[单 Post 完整归档规格](../specs/phase2-archiving.md)及[交付覆盖核对](../research/phase2-acceptance.md)，ticket 生命周期与正式验收记录以 Beads 为入口。一期具体契约见[一期可靠保存规格](../specs/phase1-saving.md)。
 
 ## 整体顺序
 

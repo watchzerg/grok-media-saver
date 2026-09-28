@@ -1,6 +1,6 @@
 # 二期：单 Post 完整归档
 
-状态：已确认的二期规格。确认日期：2026-09-28。承接 `grok-media-saver-we2` 全部最终 Resolution；规格发布不表示产品实现或验收已经完成。
+状态：已确认的二期规格。确认日期：2026-09-28。承接 `grok-media-saver-we2` 全部最终 Resolution；产品实现及自动化覆盖以代码和[交付覆盖核对](../research/phase2-acceptance.md)为证据，正式现场验收仍由用户后续人工操作。
 
 本文是二期行为、持久删除事实、恢复和验收的权威正文。Beads 规格入口为 `grok-media-saver-fa3`，引用本文；决策票保留过程与确认记录，不继续作为并行维护的契约正文。产品目标见[产品目标与首版范围](product-goals.md)，模块职责见[架构设计](../../ARCHITECTURE.md)，术语见[领域词汇](../../CONTEXT.md)。
 
