@@ -388,10 +388,7 @@ test("P2-09 S1/S2 status reports unfinished archive facts and safe recovery hint
 
   const before = await readPersistedFacts();
   const application = await readProjectStatus(readDatabaseConfig(databaseEnv));
-  const result = await runCli(
-    { ...databaseEnv, GROK_ARCHIVE_ROOT: undefined },
-    ["status"],
-  );
+  const result = await runCli({ ...databaseEnv }, ["status"]);
   const after = await readPersistedFacts();
 
   expect(application.status).toBe("ok");
