@@ -145,9 +145,14 @@ export async function readSavedVersion(
   versionId: string,
 ) {
   const [version] = await session<
-    { relativePath: string; byteCount: string; sha256: string }[]
+    {
+      relativePath: string;
+      byteCount: string;
+      sha256: string;
+      mimeType: string;
+    }[]
   >`
-    SELECT relative_path AS "relativePath", byte_count::text AS "byteCount", sha256
+    SELECT relative_path AS "relativePath", byte_count::text AS "byteCount", sha256, mime_type AS "mimeType"
     FROM media_versions WHERE id = ${versionId}::uuid AND post_id = ${postId}
   `;
   return version;
@@ -222,8 +227,16 @@ export async function recordPublishIntent(
       publish_temp_name = ${intent.tempName}, publish_relative_path = ${intent.relativePath},
       publish_expected_bytes = ${intent.publishBytes}::bigint, publish_sha256 = ${intent.sha256},
       last_error = NULL
-    WHERE post_id = ${postId} AND status IN ('pending', 'failed')
-      AND publish_sha256 IS NULL
+    WHERE post_id = ${postId} AND publish_sha256 IS NULL
+      AND (status IN ('pending', 'failed') OR (status = 'saved' AND removal_state = 'removed'))
+      AND (removal_state <> 'removed' OR (
+        NOT archive_settled AND saved_media_version_id = deletion_media_version_id
+        AND EXISTS (SELECT 1 FROM media_versions WHERE id = deletion_media_version_id
+          AND post_id = ${postId} AND sha256 = ${intent.sha256}
+          AND byte_count = ${intent.publishBytes}::bigint AND mime_type = ${intent.mimeType}
+          AND relative_path = ${intent.relativePath})
+        AND selected_key IS NOT DISTINCT FROM ${selection.key ?? null}
+        AND quality = ${selection.quality}))
     RETURNING post_id
   `;
   if (updated.length !== 1)

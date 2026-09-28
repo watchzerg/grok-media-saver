@@ -1555,54 +1555,50 @@ test("P2-05 S1 无媒体存在判据先结清旧意图，再核验复用并仅�
   });
 });
 
-test.each(["missing", "conflict"])(
-  "P2-04 S1 GET确认移除后绑定文件%s保留removed未结清，正确文件恢复后无请求结清",
-  async (kind) => {
-    const root = await seedPendingArchive();
-    const [version] =
-      await testSql`SELECT relative_path FROM media_versions WHERE post_id=${postId}`;
-    const path = join(root, String(version?.relative_path));
-    if (kind === "missing") await rm(path);
-    else await writeFile(path, Buffer.alloc(media.length, 1));
-    const fake = checkOptions();
-    const result = await archiveSelectedPost(
-      config(),
-      postId,
-      new AbortController().signal,
-      undefined,
-      fake.connect,
-    );
-    expect(result).toMatchObject({
-      status: "failed",
-      remoteObservation: "removed",
-      archiveRecorded: false,
-    });
-    expect(await work()).toMatchObject({
-      removal_state: "removed",
-      archive_settled: false,
-    });
-    expect(fake.requests).toEqual([`check:${postId}`]);
-    const next = await archiveSelectedPost(
-      config(),
-      postId,
-      new AbortController().signal,
-      undefined,
-      fake.connect,
-    );
-    expect(next.status).toBe("failed");
-    expect(fake.requests).toEqual([`check:${postId}`]);
-    await writeFile(path, media);
-    const restored = await archiveSelectedPost(
-      config(),
-      postId,
-      new AbortController().signal,
-      undefined,
-      fake.connect,
-    );
-    expect(restored).toMatchObject({ status: "ok", archiveRecorded: true });
-    expect(fake.requests).toEqual([`check:${postId}`]);
-  },
-);
+test("P2-04 S1 GET确认移除后绑定文件冲突保留removed未结清，正确文件恢复后无请求结清", async () => {
+  const root = await seedPendingArchive();
+  const [version] =
+    await testSql`SELECT relative_path FROM media_versions WHERE post_id=${postId}`;
+  const path = join(root, String(version?.relative_path));
+  await writeFile(path, Buffer.alloc(media.length, 1));
+  const fake = checkOptions();
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    new AbortController().signal,
+    undefined,
+    fake.connect,
+  );
+  expect(result).toMatchObject({
+    status: "failed",
+    remoteObservation: "removed",
+    archiveRecorded: false,
+  });
+  expect(await work()).toMatchObject({
+    removal_state: "removed",
+    archive_settled: false,
+  });
+  expect(fake.requests).toEqual([`check:${postId}`]);
+  const next = await archiveSelectedPost(
+    config(),
+    postId,
+    new AbortController().signal,
+    undefined,
+    fake.connect,
+  );
+  expect(next.status).toBe("failed");
+  expect(fake.requests).toEqual([`check:${postId}`]);
+  await writeFile(path, media);
+  const restored = await archiveSelectedPost(
+    config(),
+    postId,
+    new AbortController().signal,
+    undefined,
+    fake.connect,
+  );
+  expect(restored).toMatchObject({ status: "ok", archiveRecorded: true });
+  expect(fake.requests).toEqual([`check:${postId}`]);
+});
 
 const removedCheckEnv = {
   GMS_TEST_CHECK_STATUS: "404",
@@ -2287,3 +2283,320 @@ test("P2-06 S2 真实CLI本次未知GET确认移除与仍存在的退出和持�
     archive_settled: false,
   });
 });
+
+async function seedRemovedMissing() {
+  const root = await seedPendingArchive();
+  await testSql`UPDATE post_work SET removal_state='removed' WHERE post_id=${postId}`;
+  const [version] =
+    await testSql`SELECT relative_path, sha256 FROM media_versions WHERE post_id=${postId}`;
+  const path = join(root, String(version?.relative_path));
+  await rm(path);
+  return { root, path, version, before: await work() };
+}
+
+test("P2-07 S1 已移除缺失文件仅从绑定来源补回原版本", async () => {
+  const { path, before } = await seedRemovedMissing();
+  const fake = options();
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    new AbortController().signal,
+    undefined,
+    fake.connect,
+  );
+  expect(result).toMatchObject({
+    status: "ok",
+    archiveRecorded: true,
+    remoteObservation: "removed",
+  });
+  expect(fake.requests).toEqual(["media"]);
+  expect(await readFile(path)).toEqual(media);
+  expect(await work()).toMatchObject({
+    removal_state: "removed",
+    archive_settled: true,
+    deletion_media_version_id: before?.deletion_media_version_id,
+  });
+});
+
+test.each(["临时文件", "正式文件"])(
+  "P2-07 S1 优先恢复%s发布意图而不请求媒体",
+  async (kind) => {
+    const { root, path, version, before } = await seedRemovedMissing();
+    const tempName = ".bound.part";
+    await writeFile(
+      kind === "临时文件" ? join(root, postId, tempName) : path,
+      media,
+    );
+    await testSql`UPDATE post_work SET status='finalizing', publish_temp_name=${tempName}, publish_relative_path=${String(version?.relative_path)}, publish_expected_bytes=${media.length}, publish_sha256=${String(version?.sha256)} WHERE post_id=${postId}`;
+    const fake = options();
+    const result = await archiveSelectedPost(
+      config(),
+      postId,
+      new AbortController().signal,
+      undefined,
+      fake.connect,
+    );
+    expect(result).toMatchObject({ status: "ok", archiveRecorded: true });
+    expect(fake.requests).toEqual([]);
+    expect(await readFile(path)).toEqual(media);
+    expect(await work()).toMatchObject({
+      deletion_media_version_id: before?.deletion_media_version_id,
+      removal_state: "removed",
+      archive_settled: true,
+      publish_sha256: null,
+    });
+  },
+);
+
+test.each(["摘要不符", "来源失效", "类型不符", "冲突", "停止", "阻挡"])(
+  "P2-07 S1 %s保留原绑定与已移除，人工放回后可结清",
+  async (kind) => {
+    const { path, before } = await seedRemovedMissing();
+    const fake = options();
+    const controller = new AbortController();
+    let received: unknown;
+    let attempts = 0;
+    const result = await archiveSelectedPost(
+      config(),
+      postId,
+      controller.signal,
+      undefined,
+      async () => {
+        const browser = await fake.connect();
+        return {
+          ...browser,
+          downloadMedia: async (selection, response, chunk, signal) => {
+            received = selection;
+            attempts += 1;
+            fake.requests.push("bound-media");
+            if (kind === "冲突")
+              await writeFile(path, Buffer.alloc(media.length, 2));
+            if (kind === "停止") controller.abort();
+            await response({
+              status: kind === "来源失效" ? 404 : kind === "阻挡" ? 429 : 200,
+              contentType: kind === "类型不符" ? "image/jpeg" : "image/png",
+              contentLength: String(media.length),
+              contentEncoding: null,
+            });
+            if (!signal.aborted)
+              await chunk(
+                kind === "摘要不符"
+                  ? Buffer.concat([media.subarray(0, -1), Buffer.from([1])])
+                  : media,
+              );
+          },
+        };
+      },
+    );
+    expect(result.status).toBe(
+      kind === "停止" ? "cancelled" : kind === "阻挡" ? "blocked" : "failed",
+    );
+    expect(result.remoteObservation).toBe("removed");
+    expect(received).toMatchObject({
+      assetId: postId,
+      key: "https://assets.grok.com/source.png",
+      mimeType: "image/png",
+      expectedBytes: media.length,
+    });
+    expect(attempts).toBeLessThanOrEqual(2);
+    expect(fake.requests.every((request) => request === "bound-media")).toBe(
+      true,
+    );
+    expect(await work()).toMatchObject({
+      deletion_media_version_id: before?.deletion_media_version_id,
+      removal_state: "removed",
+      archive_settled: false,
+    });
+    if (kind === "冲突")
+      expect(await readFile(path)).toEqual(Buffer.alloc(media.length, 2));
+    await writeFile(path, media);
+    const next = options();
+    const restored = await archiveSelectedPost(
+      config(),
+      postId,
+      new AbortController().signal,
+      undefined,
+      next.connect,
+    );
+    expect(restored).toMatchObject({ status: "ok", archiveRecorded: true });
+    expect(next.requests).toEqual([]);
+  },
+);
+
+test("P2-07 S2 原来源补救仅发媒体请求并以原版本结清", async () => {
+  const { root, path, before } = await seedRemovedMissing();
+  const events = join(root, "bound-requests");
+  const result = await cli({ GMS_TEST_REQUEST_EVENTS: events });
+  expect(result.exitCode, JSON.stringify(result)).toBe(0);
+  expect(await readFile(path)).toEqual(media);
+  expect(
+    (await readFile(events, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line).kind),
+  ).toEqual(["media"]);
+  expect(await work()).toMatchObject({
+    deletion_media_version_id: before?.deletion_media_version_id,
+    removal_state: "removed",
+    archive_settled: true,
+  });
+});
+
+test.each(["发布意图", "保存结果", "结清"])(
+  "P2-07 S2 %s提交丢回执停止且按真实DB继续",
+  async (stage) => {
+    const { root, before } = await seedRemovedMissing();
+    const events = join(root, "bound-requests");
+    const result = await cli(
+      { GMS_TEST_REQUEST_EVENTS: events, GMS_TEST_LOSE_BOUND_RECEIPT: stage },
+      postId,
+      ["./tests/helpers/lose-bound-receipt.ts"],
+    );
+    expect(result.exitCode, JSON.stringify(result)).toBe(1);
+    expect(result.stderr).toContain("提交结果未知");
+    expect(await work()).toMatchObject({
+      deletion_media_version_id: before?.deletion_media_version_id,
+      removal_state: "removed",
+      archive_settled: stage === "结清",
+    });
+    const next = await cli({ GMS_TEST_REQUEST_EVENTS: events });
+    expect(next.exitCode, JSON.stringify(next)).toBe(0);
+    expect(
+      (await readFile(events, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line).kind),
+    ).toEqual(["media"]);
+  },
+);
+
+test("P2-07 S1 绑定媒体503仅有限重试原来源，不重读详情", async () => {
+  await seedRemovedMissing();
+  const fake = options();
+  let attempts = 0;
+  const selections: unknown[] = [];
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    new AbortController().signal,
+    undefined,
+    async () => {
+      const browser = await fake.connect();
+      return {
+        ...browser,
+        downloadMedia: async (selection, response, chunk) => {
+          selections.push(selection);
+          if (++attempts === 1)
+            return response({
+              status: 503,
+              contentType: "image/png",
+              contentLength: String(media.length),
+              contentEncoding: null,
+            });
+          return browser.downloadMedia(selection, response, chunk);
+        },
+      };
+    },
+  );
+  expect(result).toMatchObject({ status: "ok", archiveRecorded: true });
+  expect(attempts).toBe(2);
+  expect(selections[0]).toEqual(selections[1]);
+  expect(fake.requests).toEqual(["media"]);
+});
+
+test("P2-07 S1 更换当前目录不搜索仍有正确文件的旧目录", async () => {
+  const oldRoot = await seedPendingArchive();
+  await testSql`UPDATE post_work SET removal_state='removed' WHERE post_id=${postId}`;
+  const [version] =
+    await testSql`SELECT relative_path FROM media_versions WHERE post_id=${postId}`;
+  archiveRoot = await mkdtemp(join(tmpdir(), "gms-bound-new-root-"));
+  try {
+    const fake = options();
+    const result = await archiveSelectedPost(
+      config(),
+      postId,
+      new AbortController().signal,
+      undefined,
+      fake.connect,
+    );
+    expect(result).toMatchObject({ status: "ok", archiveRecorded: true });
+    expect(fake.requests).toEqual(["media"]);
+    expect(
+      await readFile(join(archiveRoot, String(version?.relative_path))),
+    ).toEqual(media);
+    expect(
+      await readFile(join(oldRoot, String(version?.relative_path))),
+    ).toEqual(media);
+  } finally {
+    await rm(oldRoot, { recursive: true, force: true });
+  }
+});
+
+test.each(["发布意图", "保存结果", "结清"])(
+  "P2-07 S2 %s事务未提交停止并保留移除和绑定",
+  async (stage) => {
+    const { root, before } = await seedRemovedMissing();
+    const condition =
+      stage === "发布意图"
+        ? "NEW.status = 'finalizing'"
+        : stage === "保存结果"
+          ? "OLD.status = 'finalizing' AND NEW.status = 'saved'"
+          : "NEW.archive_settled";
+    await testSql.unsafe(
+      `CREATE FUNCTION reject_bound_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF ${condition} THEN RAISE EXCEPTION '模拟绑定事务未提交'; END IF; RETURN NEW; END $$`,
+    );
+    await testSql`CREATE TRIGGER reject_bound_write BEFORE UPDATE ON post_work FOR EACH ROW EXECUTE FUNCTION reject_bound_write()`;
+    const events = join(root, "bound-requests");
+    try {
+      const result = await cli({ GMS_TEST_REQUEST_EVENTS: events });
+      expect(result.exitCode, JSON.stringify(result)).toBe(1);
+      expect(result.stderr).toContain("提交结果未知");
+      expect(await work()).toMatchObject({
+        deletion_media_version_id: before?.deletion_media_version_id,
+        removal_state: "removed",
+        archive_settled: false,
+        status: stage === "保存结果" ? "finalizing" : "saved",
+      });
+      expect(
+        (await readFile(events, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line).kind),
+      ).toEqual(["media"]);
+    } finally {
+      await testSql`DROP TRIGGER reject_bound_write ON post_work`;
+      await testSql`DROP FUNCTION reject_bound_write()`;
+    }
+    expect((await cli()).exitCode).toBe(0);
+  },
+);
+
+test.each(["丢锁", "断连"])(
+  "P2-07 S1 补救浏览器准备时%s立即终止推进并保留绑定",
+  async (kind) => {
+    const { before } = await seedRemovedMissing();
+    const fake = options();
+    const result = await archiveSelectedPost(
+      config(),
+      postId,
+      new AbortController().signal,
+      undefined,
+      async () => {
+        if (kind === "断连") throw new Error("浏览器连接断开，基础能力不可用");
+        await testSql`SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype='advisory' AND granted AND classid=1297043787::oid AND objid=1::oid`;
+        return fake.connect();
+      },
+    );
+    expect(result).toMatchObject({
+      status: "failed",
+      fatalExecution: true,
+      remoteObservation: "removed",
+    });
+    expect(fake.requests).toEqual([]);
+    expect(await work()).toMatchObject({
+      removal_state: "removed",
+      archive_settled: false,
+      deletion_media_version_id: before?.deletion_media_version_id,
+    });
+  },
+);

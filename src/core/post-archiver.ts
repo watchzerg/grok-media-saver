@@ -30,7 +30,13 @@ type Store = {
     postId: string,
     versionId: string,
   ): Promise<
-    { relativePath: string; byteCount: string; sha256: string } | undefined
+    | {
+        relativePath: string;
+        byteCount: string;
+        sha256: string;
+        mimeType: string;
+      }
+    | undefined
   >;
   recordReusedVersion(
     postId: string,
@@ -448,7 +454,7 @@ export async function archivePost({
     const version = await store.readSavedVersion(postId, versionId);
     if (!version) throw new Error("删除绑定版本不存在，归档未结清。");
     onStage?.("核验删除绑定文件");
-    const check = await files.checkArchiveFile(
+    let check = await files.checkArchiveFile(
       version.relativePath,
       Number(version.byteCount),
       version.sha256,
@@ -457,8 +463,12 @@ export async function archivePost({
       result.status = "cancelled";
       return;
     }
+    if (check.status === "missing" || boundWork.status === "finalizing") {
+      if (!(await restoreBoundFile(boundWork, version))) return;
+      check = { status: "ok" };
+    }
     if (check.status !== "ok") {
-      result.message = `远端已确认移除，绑定文件${check.status === "missing" ? "缺失" : check.status === "failed" ? `访问失败：${check.reason}` : "内容冲突或不符"}；归档未结清。`;
+      result.message = `远端已确认移除，绑定文件${check.status === "failed" ? `访问失败：${check.reason}` : "内容冲突或不符"}；归档未结清。`;
       return;
     }
     try {
@@ -481,6 +491,157 @@ export async function archivePost({
     result.status = "ok";
     result.message = "远端已确认移除，绑定文件核验通过，归档已结清。";
     onStage?.("恢复归档结清已提交");
+  }
+
+  async function restoreBoundFile(
+    boundWork: Work,
+    version: {
+      relativePath: string;
+      byteCount: string;
+      sha256: string;
+      mimeType: string;
+    },
+  ): Promise<boolean> {
+    const matches = (intent: {
+      relativePath: string | null;
+      publishBytes: string | null;
+      sha256: string | null;
+      mimeType: string | null;
+    }) =>
+      intent.relativePath === version.relativePath &&
+      intent.publishBytes === version.byteCount &&
+      intent.sha256 === version.sha256 &&
+      intent.mimeType === version.mimeType;
+    let pending = boundWork;
+    try {
+      if (pending.status === "finalizing") {
+        if (!matches(pending))
+          throw new Error("发布意图与删除绑定版本不符，现场已保留。");
+        onStage?.("核对绑定发布意图");
+        const publication = await files.publishIntent(
+          postId,
+          pending,
+          signal,
+          onStage,
+        );
+        if (publication === "published")
+          return await finishBoundPublication(pending);
+        await store.assertLock();
+        if (signal.aborted) throw new Error("补救已停止。");
+        try {
+          await store.clearMissingIntent(postId, pending, runId);
+        } catch (error) {
+          uncertainWrite(error, "缺失发布意图核对");
+          return false;
+        }
+      }
+      if (!boundWork.selectedKey || !boundWork.quality || !downloadMedia)
+        throw new MediaCapabilityUnavailableError(
+          "绑定媒体原来源或下载能力不可用。",
+        );
+      const selection: PostMediaSelection = {
+        assetId: postId,
+        key: boundWork.selectedKey,
+        quality: boundWork.quality as PostMediaSelection["quality"],
+        mimeType: version.mimeType,
+        expectedBytes: Number(version.byteCount),
+      };
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        await waitBeforeRetry(signal);
+        await store.assertLock();
+        if (signal.aborted) throw new Error("补救已停止。");
+        onStage?.("下载删除绑定媒体");
+        let intent: Awaited<ReturnType<FileCapabilities["downloadToTemp"]>>;
+        try {
+          intent = await files.downloadToTemp(
+            postId,
+            selection,
+            downloadMedia,
+            signal,
+            onStage,
+            mediaTimeouts,
+          );
+        } catch (error) {
+          if (
+            error instanceof RetryableMediaError &&
+            attempt < 2 &&
+            !signal.aborted
+          )
+            continue;
+          throw error;
+        }
+        if (!matches(intent)) {
+          await files.discardDownloadedTemp(postId, intent);
+          throw new KnownSaveFailure(
+            "补救内容与绑定大小、类型或 SHA-256 不符。",
+          );
+        }
+        try {
+          await store.assertLock();
+          if (signal.aborted) throw new Error("补救已停止。");
+        } catch (error) {
+          await files.discardDownloadedTemp(postId, intent);
+          throw error;
+        }
+        onStage?.("提交绑定发布意图");
+        try {
+          await store.recordPublishIntent(postId, runId, selection, intent);
+        } catch (error) {
+          uncertainWrite(error, "绑定发布意图");
+          return false;
+        }
+        pending = (await store.readWork(postId)) as Work;
+        if (pending?.status !== "finalizing" || !matches(pending))
+          throw new Error("绑定发布意图提交后无法确认。");
+        if (
+          (await files.publishIntent(postId, pending, signal, onStage)) !==
+          "published"
+        )
+          throw new Error("绑定发布意图临时文件缺失。");
+        return await finishBoundPublication(pending);
+      }
+    } catch (error) {
+      result.status = signal.aborted
+        ? "cancelled"
+        : error instanceof BlockedMediaError
+          ? "blocked"
+          : "failed";
+      result.message = `远端已确认移除，绑定文件补救未完成；归档未结清：${error instanceof Error ? error.message : String(error)}`;
+      if (
+        !signal.aborted &&
+        !(error instanceof RetryableMediaError) &&
+        !(error instanceof BlockedMediaError) &&
+        !(error instanceof MediaCapabilityUnavailableError) &&
+        !(error instanceof KnownSaveFailure) &&
+        !(error instanceof Error && /^媒体请求失败/.test(error.message))
+      )
+        result.fatalExecution = true;
+      if (error instanceof UnconfirmedStopError) {
+        result.fatalExecution = true;
+        result.cleanupErrors.push(error.message);
+      }
+    }
+    return false;
+  }
+
+  async function finishBoundPublication(pending: Work): Promise<boolean> {
+    try {
+      await store.assertLock();
+      onStage?.("提交绑定保存结果");
+      await store.settleIntent(postId, pending, runId);
+    } catch (error) {
+      uncertainWrite(error, "绑定保存结果");
+      return false;
+    }
+    onStage?.("绑定保存结果已提交");
+    const cleanup = await files.cleanupPublishedTemp(postId, pending);
+    if (cleanup) {
+      result.cleanupErrors.push(cleanup);
+      result.fatalExecution = true;
+      result.message = `远端已确认移除，归档未结清；${cleanup}`;
+      return false;
+    }
+    return true;
   }
 
   function uncertainWrite(error: unknown, operation: string): void {

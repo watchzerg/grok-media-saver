@@ -238,6 +238,9 @@ export async function archivePostInRun(
       },
       waitBeforeRetry: options.waitBeforeRetry,
       downloadMedia: async (selection, onResponse, onChunk, transferSignal) => {
+        browser ??= await options.connect(transferSignal);
+        await assertExecutorLock(session);
+        if (transferSignal.aborted) throw new Error("媒体下载已停止。");
         if (!browser?.downloadMedia)
           throw new MediaCapabilityUnavailableError(
             "浏览器会话不支持媒体流传输。",
