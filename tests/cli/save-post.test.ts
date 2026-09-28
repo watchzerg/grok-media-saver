@@ -1304,3 +1304,90 @@ test("real CLI still exits 1 for a download needed without SIGINT", async () => 
   `;
   expect(run?.outcome).toBe("failed");
 });
+
+test("P2-01 S1 save 拒绝未结清 archive 并保留发布恢复事实", async () => {
+  const config = await seed();
+  await testSql`UPDATE post_work SET goal = 'archive', last_error = '保留恢复现场' WHERE post_id = ${postId}`;
+  await writeFile(join(config.archiveRoot, postId, tempName), bytes);
+  const [before] =
+    await testSql`SELECT * FROM post_work WHERE post_id = ${postId}`;
+  let requests = 0;
+  const result = await saveViaApplication(config, postId, {
+    connect: async () => {
+      requests += 1;
+      throw new Error("不得连接浏览器");
+    },
+  });
+  expect(result.status).toBe("failed");
+  expect(result.message).toContain("archive post");
+  expect(result.message).toContain("未处理");
+  expect(requests).toBe(0);
+  const [after] =
+    await testSql`SELECT * FROM post_work WHERE post_id = ${postId}`;
+  expect(after).toEqual(before);
+  expect(await readFile(join(config.archiveRoot, postId, tempName))).toEqual(
+    bytes,
+  );
+});
+
+test("P2-01 S1 已结清 archive 即使文件缺失也直接跳过", async () => {
+  const config = await seed();
+  await testSql`UPDATE post_work SET goal = 'archive', archive_settled = true WHERE post_id = ${postId}`;
+  await rm(config.archiveRoot, { recursive: true });
+  const [before] =
+    await testSql`SELECT * FROM post_work WHERE post_id = ${postId}`;
+  let requests = 0;
+  const stages: string[] = [];
+  const result = await saveViaApplication(config, postId, {
+    connect: async () => {
+      requests += 1;
+      throw new Error("不得连接浏览器");
+    },
+    onStage: (stage) => stages.push(stage),
+  });
+  expect(result.status).toBe("ok");
+  expect(result.message).toContain("已归档结清");
+  expect(result.message).toContain("跳过");
+  expect(requests).toBe(0);
+  expect(stages).not.toContain("核对发布意图");
+  expect(stages).not.toContain("核验已保存文件");
+  const [after] =
+    await testSql`SELECT * FROM post_work WHERE post_id = ${postId}`;
+  expect(after).toEqual(before);
+});
+
+test.each([false, true])(
+  "P2-01 S2 指定 save 保护 archive，结清=%s",
+  async (settled) => {
+    const config = await seed();
+    await testSql`UPDATE post_work SET goal = 'archive', archive_settled = ${settled} WHERE post_id = ${postId}`;
+    const [before] =
+      await testSql`SELECT * FROM post_work WHERE post_id = ${postId}`;
+    await rm(config.archiveRoot, { recursive: true });
+    const child = Bun.spawn(
+      [process.execPath, "--no-env-file", "src/cli.ts", "save", "post", postId],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...databaseEnv,
+          GROK_ARCHIVE_DIR: config.archiveRoot,
+          PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(exitCode, stderr).toBe(settled ? 0 : 1);
+    expect(stdout + stderr).toContain(settled ? "已归档结清" : "archive post");
+    expect(stdout + stderr).not.toContain("核对发布意图");
+    expect(stdout + stderr).not.toContain("读取当前详情");
+    const [after] =
+      await testSql`SELECT * FROM post_work WHERE post_id = ${postId}`;
+    expect(after).toEqual(before);
+  },
+);

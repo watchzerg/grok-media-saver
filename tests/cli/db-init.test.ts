@@ -351,3 +351,29 @@ async function readPersistedFacts() {
   `;
   return { runs, work };
 }
+
+test("P2-01 S1/S2 目标 schema 重复核对并拒绝缺失字段，保留数据", async () => {
+  await testSql`DROP TABLE IF EXISTS media_versions, post_work, runs CASCADE`;
+  const config = readDatabaseConfig(databaseEnv);
+  expect((await initializeProjectDatabase(config)).status).toBe("ok");
+  await testSql`INSERT INTO post_work (post_id, goal, status) VALUES ('protected', 'archive', 'pending')`;
+  expect((await checkProjectDatabase(config)).status).toBe("ok");
+  expect((await runCli(databaseEnv, ["db", "init"])).exitCode).toBe(0);
+  await testSql`ALTER TABLE post_work DROP COLUMN archive_settled`;
+  const [before] =
+    await testSql`SELECT * FROM post_work WHERE post_id = 'protected'`;
+  const initialize = await runCli(databaseEnv, ["db", "init"]);
+  const status = await runCli(databaseEnv, ["status"]);
+  const application = await checkProjectDatabase(config);
+  expect(initialize.exitCode).toBe(1);
+  expect(status.exitCode).toBe(1);
+  expect(initialize.stderr).toContain("数据库结构与当前版本不一致");
+  expect(status.stderr).toContain("数据库结构与当前版本不一致");
+  expect(application.status).toBe("failed");
+  const [after] =
+    await testSql`SELECT * FROM post_work WHERE post_id = 'protected'`;
+  expect(after).toEqual(before);
+  const [column] =
+    await testSql`SELECT column_name FROM information_schema.columns WHERE table_name = 'post_work' AND column_name = 'archive_settled'`;
+  expect(column).toBeUndefined();
+});

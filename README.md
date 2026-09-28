@@ -39,7 +39,7 @@ mise exec -- bun src/cli.ts save first-page
 
 ## 初始化项目数据库
 
-`db init` 只连接 `.env` 中的项目 PostgreSQL 配置，检查并创建当前 schema；它不会创建数据库、清空数据或启动浏览器。结构符合当前 schema 时可重复运行；结构不符时会报错。普通命令的 schema 检查只读，不会自动创建或迁移结构。
+`db init` 只连接 `.env` 中的项目 PostgreSQL 配置，检查并创建当前 schema；它不会创建数据库、清空数据或启动浏览器。结构符合当前 schema 时可重复运行；结构不符时会报错。普通命令的 schema 检查只读，不会自动创建或迁移结构。当前 `post_work` 包含 `goal` 和 `archive_settled`；缺少这些字段的旧 schema 明确失败，保留数据，不自动迁移或清空。
 
 ```sh
 mise exec -- bun src/cli.ts db init
@@ -57,7 +57,7 @@ mise exec -- bun src/cli.ts status
 
 ## 重试未完成 Post
 
-`retry` 通过 PostgreSQL 会话锁避免同一数据库上的并发写入。启动时固定 `pending`、`finalizing`、`failed` Post 集合，按 Post ID 顺序每项处理一次；不依赖当前 Saved 第一页，也不纳入执行期间新增的 Post。每项复用指定 Post 的发布恢复、当前来源核对和图片/视频保存路径。普通单 Post 失败继续，限流、停止、丢锁或基础资源故障停止后续目标。处理非空集合时终端显示当前阶段；终端及正常收尾的 Run 摘要显示已保存、失败和未处理数量。有失败或未处理时退出 `1`，首次 Ctrl+C 退出 `130`。空集合只需要项目数据库配置，成功收尾且不连接浏览器；非空集合还需要归档目录、Extension token 和保存用配置。Run 写入失去回执时，命令不推断其结果或声称已记账。
+`retry` 通过 PostgreSQL 会话锁避免同一数据库上的并发写入。启动时固定纯保存目标的 `pending`、`finalizing`、`failed` Post，以及尚未结清的 `archive` 工作，按 Post ID 顺序每项处理一次；不依赖当前 Saved 第一页，也不纳入执行期间新增的 Post。纯保存项复用指定 Post 的发布恢复、当前来源核对和图片/视频保存路径。当前归档接续分派尚未实现，`archive` 项保持未处理并保留原事实，整体退出 `1`；不会按保存路径降级处理。普通单 Post 失败继续，限流、停止、丢锁或基础资源故障停止后续目标。处理非空集合时终端显示当前阶段；终端及正常收尾的 Run 摘要显示已保存、失败和未处理数量。有失败或未处理时退出 `1`，首次 Ctrl+C 退出 `130`。空集合只需要项目数据库配置，成功收尾且不连接浏览器；非空集合还需要归档目录、Extension token 和保存用配置。Run 写入失去回执时，命令不推断其结果或声称已记账。
 
 ```sh
 mise exec -- bun src/cli.ts retry
@@ -65,7 +65,7 @@ mise exec -- bun src/cli.ts retry
 
 ## 保存指定 Post
 
-`save post <Post-ID>` 每次启动新的 Run；即使该 Post 已是 `saved`，也先核对已有 `finalizing` 意图，再读取当前详情。来源和当前 `GROK_ARCHIVE_DIR` 内已保存文件的大小、SHA-256 均匹配时复用，且不重新下载；文件缺失或来源、适用元数据变化时重新下载。文件访问或权限错误会停止本次下载，保留现有工作事实。需要新文件时通过 Chrome Extension 对所选媒体发起一次完整 GET，将响应流写入当前目录的临时文件。只有 HTTP 200、可信长度、类型及文件头、完整 EOF、实写和重读核验通过，才记录意图并无覆盖发布；Grok 将 JPEG 错标为 PNG 的已知情况按实际 JPEG 类型和 `.jpg` 扩展名保存。冲突保留现场，不覆盖目标文件；再次保存失败保留原成功版本记录，原文件已存在且未受损时也保留原文件。普通暂时失败最多重试一次，重试前重读详情。
+`save post <Post-ID>` 每次启动新的 Run；对于纯保存工作，即使该 Post 已是 `saved`，也先核对已有 `finalizing` 意图，再读取当前详情。来源和当前 `GROK_ARCHIVE_DIR` 内已保存文件的大小、SHA-256 均匹配时复用，且不重新下载；文件缺失或来源、适用元数据变化时重新下载。文件访问或权限错误会停止本次下载，保留现有工作事实。需要新文件时通过 Chrome Extension 对所选媒体发起一次完整 GET，将响应流写入当前目录的临时文件。只有 HTTP 200、可信长度、类型及文件头、完整 EOF、实写和重读核验通过，才记录意图并无覆盖发布；Grok 将 JPEG 错标为 PNG 的已知情况按实际 JPEG 类型和 `.jpg` 扩展名保存。冲突保留现场，不覆盖目标文件；再次保存失败保留原成功版本记录，原文件已存在且未受损时也保留原文件。普通暂时失败最多重试一次，重试前重读详情。
 
 ```sh
 mise exec -- bun src/cli.ts save post <Post-ID>
@@ -74,6 +74,8 @@ mise exec -- bun src/cli.ts save post <Post-ID>
 此命令需要数据库、归档目录和 Playwright Extension 配置；只作用于当前 schema 与新启动的 Run。媒体首字节、无写入进展及总时长分别默认限制为 30 秒、30 秒、15 分钟，可通过 `.env.example` 中的配置键调整。首次 Ctrl+C 停止新请求，已开始的文件发布及短事务先完成必要收尾；再次运行同一命令会重新核对数据库与文件事实。
 若停止发生在 Run 成功收尾事务开始后，命令仍以 `130` 报告停止，已提交的 `succeeded` Run 与已保存 Post 保持原样。
 详情阻挡或需要下载等结果得出后收到停止时，也以 `130` 报告停止并保留原原因；已提交的 Run 和 Post 事实不会改写。
+
+保存工作明确记录 `save` 目标。只保存入口不会降低既有 `archive` 目标：未结清的归档工作直接报告未处理；单页保存继续其他项并整体退出 `1`。已归档结清的 Post 直接跳过，不访问文件或远端，也不重新打开工作。正式 `archive post` 和混合 retry 的归档接续由二期后续实现提供，当前只交付目标保护，未提供 DELETE。完整契约见[二期规格](docs/specs/phase2-archiving.md#入口与工作目标)。
 
 ## 核验指定 Post 的本地文件
 

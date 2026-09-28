@@ -552,3 +552,57 @@ test("S2 page save rereads saved work and shares request interval across page, d
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("P2-01 S2 单页保留 archive、报告未处理并继续新 save", async () => {
+  await reset();
+  const root = await mkdtemp(join(tmpdir(), "gms-page-goals-"));
+  const events = join(root, "events");
+  try {
+    await testSql`INSERT INTO post_work (post_id, goal, status, last_error)
+      VALUES (${ids[0]}, 'archive', 'pending', '保留待归档'),
+      (${ids[1]}, 'archive', 'saved', '保留已保存但未结清')`;
+    await testSql`INSERT INTO post_work (post_id, goal, archive_settled, status)
+      VALUES (${ids[2]}, 'archive', true, 'saved')`;
+    const before = await testSql`SELECT * FROM post_work ORDER BY post_id`;
+    const result = await run({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture",
+      GROK_API_INTERVAL_MIN_SECONDS: "0",
+      GROK_API_INTERVAL_MAX_SECONDS: "0",
+      GMS_TEST_PAGE_IDS: ids.slice(0, 4).join(","),
+      GMS_TEST_MEDIA: "1",
+      GMS_TEST_REQUEST_EVENTS: events,
+    });
+    expect(result.exitCode, result.stderr).toBe(1);
+    expect(result.stderr).toContain("未处理 2");
+    expect(result.stderr).toContain("已归档结清");
+    expect(result.stderr).toContain("archive post");
+    const after =
+      await testSql`SELECT * FROM post_work WHERE post_id <> ${ids[3]} ORDER BY post_id`;
+    expect(after).toEqual(before);
+    const [fresh] =
+      await testSql`SELECT goal, archive_settled, status FROM post_work WHERE post_id = ${ids[3]}`;
+    expect(fresh).toEqual({
+      goal: "save",
+      archive_settled: false,
+      status: "saved",
+    });
+    expect(
+      (await readFile(events, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => {
+          const request = JSON.parse(line);
+          return `${request.kind}:${request.postId}`;
+        }),
+    ).toEqual(["page:", `detail:${ids[3]}`, `media:${ids[3]}`]);
+    const [savedRun] = await testSql`SELECT outcome, summary FROM runs`;
+    expect(savedRun).toEqual({
+      outcome: "failed",
+      summary: { saved: 1, failed: 0, unprocessed: 2 },
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

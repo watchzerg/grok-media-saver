@@ -19,9 +19,11 @@
 | `save post <Post-ID>` | 新建 Run，核对当前详情并保存或复用；需要同上资源。 |
 | `status` | 只读查询 DB 中最近 Run 与未完成 Post，不访问浏览器或文件。 |
 | `verify <Post-ID>` | 只读检查当前归档目录中的已保存文件大小与 SHA-256，不改变 DB 或文件。 |
-| `retry` | 新建 Run，固定启动时的 `pending`、`finalizing`、`failed` 集合并逐项接续；空集合只需 DB，有目标时还需归档目录与 Chrome/Extension。 |
+| `retry` | 新建 Run，固定启动时纯保存目标的 `pending`、`finalizing`、`failed` 及未结清 `archive` 集合；纯保存逐项接续，当前归档项保留未处理；空集合只需 DB，有目标时还需归档目录与 Chrome/Extension。 |
 
 所有命令用 `mise exec -- bun src/cli.ts <命令>` 执行。退出码为 `0` 成功、`1` 执行或核验失败、`2` 参数或配置错误、`130` 首次 Ctrl+C 停止。`save first-page` 和 `retry` 的已保存、失败、未处理数量只对正常收尾且已确认的 Run 有效；未收尾 Run 的数量未知。普通单 Post 失败可继续后项；登录/challenge、429、停止、丢锁和基础资源故障会结束本次调度。
+
+当前 schema 明确保存 `goal` 与 `archive_settled`；旧结构不匹配时保留数据并失败，不自动迁移。保存入口拒绝接管未结清 `archive` 工作；单页继续其余成员，整体非零。已结清工作直接跳过，不读取文件或详情。正式归档与 retry 按目标接续尚待二期后续实现；本阶段不会发起 DELETE，`archive` 工作也不会被降为 `save`。对应契约见[二期规格](../specs/phase2-archiving.md#入口与工作目标)。
 
 ## 核验和恢复
 

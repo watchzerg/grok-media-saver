@@ -2,6 +2,8 @@ import type { ReservedSQL } from "bun";
 export class KnownSaveFailure extends Error {}
 export class KnownSaveConflict extends KnownSaveFailure {}
 export type Work = {
+  goal: "save" | "archive";
+  archiveSettled: boolean;
   status: string;
   selectedKey: string | null;
   quality: string | null;
@@ -19,7 +21,7 @@ async function readWork(
   postId: string,
 ): Promise<Work | undefined> {
   const [work] = await session<Work[]>`
-    SELECT status, selected_key AS "selectedKey", quality,
+    SELECT goal, archive_settled AS "archiveSettled", status, selected_key AS "selectedKey", quality,
       mime_type AS "mimeType", expected_bytes::text AS "expectedBytes",
       saved_media_version_id::text AS "savedMediaVersionId",
       publish_temp_name AS "tempName",
@@ -100,8 +102,8 @@ export async function startWork(
   runId: string,
 ): Promise<void> {
   await session`
-    INSERT INTO post_work (post_id, status, last_run_id)
-    VALUES (${postId}, 'pending', ${runId}::uuid)
+    INSERT INTO post_work (post_id, goal, status, last_run_id)
+    VALUES (${postId}, 'save', 'pending', ${runId}::uuid)
   `;
 }
 

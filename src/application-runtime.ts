@@ -250,7 +250,8 @@ async function runBatch(
             command === "retry"
               ? await session<{ postId: string }[]>`
             SELECT post_id AS "postId" FROM post_work
-            WHERE status IN ('pending', 'finalizing', 'failed')
+            WHERE (goal = 'save' AND status IN ('pending', 'finalizing', 'failed'))
+              OR (goal = 'archive' AND NOT archive_settled)
             ORDER BY post_id
           `
               : [];
@@ -427,7 +428,19 @@ async function runBatch(
                     ].join(" ");
                     break;
                   }
+                  if (browserResult.unprocessed) {
+                    postErrors.push(
+                      `Post ${target.postId}：${browserResult.message}`,
+                    );
+                    continue;
+                  }
                   counts.unprocessed -= 1;
+                  if (browserResult.alreadySettled) {
+                    postErrors.push(
+                      `Post ${target.postId}：${browserResult.message}`,
+                    );
+                    continue;
+                  }
                   if (
                     browserResult.status === "ok" ||
                     (browserResult.status === "cancelled" &&

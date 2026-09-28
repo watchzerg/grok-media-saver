@@ -1482,3 +1482,55 @@ async function resetSchema() {
     (await initializeProjectDatabase(readDatabaseConfig(databaseEnv))).status,
   ).toBe("ok");
 }
+
+test("P2-01 S2 混合 retry 不降级 archive 或遗漏已保存未结清工作", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-goals-"));
+  const events = join(root, "events");
+  const ids = [
+    "123e4567-e89b-42d3-a456-426614174000",
+    "123e4567-e89b-42d3-a456-426614174001",
+    "123e4567-e89b-42d3-a456-426614174002",
+    "123e4567-e89b-42d3-a456-426614174003",
+  ];
+  try {
+    await testSql`INSERT INTO post_work (post_id, goal, status, archive_settled, last_error)
+      VALUES (${ids[0]}, 'archive', 'pending', false, '保留现场'),
+      (${ids[1]}, 'archive', 'saved', false, '等待结清'),
+      (${ids[2]}, 'archive', 'saved', true, null),
+      (${ids[3]}, 'save', 'pending', false, null)`;
+    const before =
+      await testSql`SELECT * FROM post_work WHERE goal = 'archive' ORDER BY post_id`;
+    const result = await runFakeRetry({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      GMS_TEST_MEDIA: "1",
+      GMS_TEST_REQUEST_EVENTS: events,
+    });
+    expect(result.exitCode, result.stderr).toBe(1);
+    expect(result.stderr).toContain("未处理 2");
+    expect(result.stderr).toContain(ids[1] ?? "");
+    const after =
+      await testSql`SELECT * FROM post_work WHERE goal = 'archive' ORDER BY post_id`;
+    expect(after).toEqual(before);
+    const [saved] =
+      await testSql`SELECT goal, status FROM post_work WHERE post_id = ${ids[3]}`;
+    expect(saved).toEqual({ goal: "save", status: "saved" });
+    expect(
+      (await readFile(events, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => {
+          const request = JSON.parse(line);
+          return `${request.kind}:${request.postId}`;
+        }),
+    ).toEqual([`detail:${ids[3]}`, `media:${ids[3]}`]);
+    const [run] = await testSql`SELECT outcome, summary FROM runs`;
+    expect(run).toEqual({
+      outcome: "failed",
+      summary: { saved: 1, failed: 0, unprocessed: 2 },
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

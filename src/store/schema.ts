@@ -48,6 +48,8 @@ const schema: readonly Table[] = [
     name: "post_work",
     columns: [
       ["post_id", "text", false, null],
+      ["goal", "text", false, "'save'::text"],
+      ["archive_settled", "bool", false, "false"],
       ["status", "text", false, null],
       ["last_run_id", "uuid", true, null],
       ["selected_key", "text", true, null],
@@ -63,6 +65,14 @@ const schema: readonly Table[] = [
     ],
     constraints: [
       ["post_work_pkey", "PRIMARY KEY (post_id)"],
+      [
+        "post_work_goal_check",
+        "CHECK (goal = ANY (ARRAY['save'::text, 'archive'::text]))",
+      ],
+      [
+        "post_work_archive_settled_check",
+        "CHECK (NOT archive_settled OR goal = 'archive'::text)",
+      ],
       [
         "post_work_status_check",
         "CHECK (status = ANY (ARRAY['pending'::text, 'finalizing'::text, 'saved'::text, 'failed'::text]))",
@@ -82,6 +92,10 @@ const schema: readonly Table[] = [
     ],
     create: `CREATE TABLE post_work (
       post_id text PRIMARY KEY,
+      goal text NOT NULL DEFAULT 'save' CONSTRAINT post_work_goal_check
+        CHECK (goal IN ('save', 'archive')),
+      archive_settled boolean NOT NULL DEFAULT false,
+      CONSTRAINT post_work_archive_settled_check CHECK (NOT archive_settled OR goal = 'archive'),
       status text NOT NULL CONSTRAINT post_work_status_check
         CHECK (status IN ('pending', 'finalizing', 'saved', 'failed')),
       last_run_id uuid REFERENCES runs(id),

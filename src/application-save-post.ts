@@ -59,7 +59,11 @@ export type SavePostResult = {
   cleanupErrors: string[];
 };
 
-type ArchivePostInRunResult = SavePostResult & { settledIntent: boolean };
+type ArchivePostInRunResult = SavePostResult & {
+  settledIntent: boolean;
+  unprocessed?: boolean;
+  alreadySettled?: boolean;
+};
 
 export function safeSaveError(error: unknown, config: SaveConfig): string {
   let message = safeDatabaseError(error, config);
@@ -126,7 +130,7 @@ export async function archivePostInRun(
       store: {
         readWork: async (id) => {
           const work = await readWork(session, id);
-          if (work?.status === "saved") recordSaved();
+          if (work?.status === "saved" && work.goal === "save") recordSaved();
           return work;
         },
         startWork: (id, run) => write(() => startWork(session, id, run)),

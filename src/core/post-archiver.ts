@@ -78,12 +78,29 @@ export async function archivePost({
     status: "ok" | "blocked" | "failed" | "cancelled";
     message: string;
     cleanupErrors: string[];
+    unprocessed?: boolean;
+    alreadySettled?: boolean;
   } = {
     status: "failed",
     message: "Post 保存未完成。",
     cleanupErrors: [],
   };
   let work = await store.readWork(postId);
+  if (work?.archiveSettled) {
+    return {
+      ...result,
+      status: "ok" as const,
+      alreadySettled: true,
+      message: "Post 已归档结清，本次直接跳过。",
+    };
+  }
+  if (work?.goal === "archive") {
+    return {
+      ...result,
+      unprocessed: true,
+      message: `Post ${postId} 为未结清 archive 工作，本次未处理；请使用 archive post ${postId} 或 retry 接续归档。`,
+    };
+  }
   if (!work) {
     await store.startWork(postId, runId);
     work = await store.readWork(postId);
