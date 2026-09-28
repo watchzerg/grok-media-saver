@@ -25,12 +25,14 @@ import { seedSettledArchive } from "../helpers/seed-settled-archive";
 
 useIsolatedPostgres();
 
-test("retry records a successful empty run without connecting to the browser", async () => {
+test("P2-08 S2 空retry只需DB并接管遗留Run后记录零目标Run", async () => {
   await testSql`DROP TABLE IF EXISTS media_versions, post_work, runs CASCADE`;
   expect(
     (await initializeProjectDatabase(readDatabaseConfig(databaseEnv))).status,
   ).toBe("ok");
 
+  const orphanId = crypto.randomUUID();
+  await testSql`INSERT INTO runs(id,command,started_at) VALUES (${orphanId}::uuid,'save-post',now())`;
   const result = await runCli(databaseEnv, ["retry"]);
   expect(result.exitCode, JSON.stringify(result)).toBe(0);
   expect(result.stdout).toContain("没有未完成 Post");
@@ -45,7 +47,10 @@ test("retry records a successful empty run without connecting to the browser", a
       outcome: string | null;
       summary: unknown;
     }[]
-  >`SELECT command, finished_at, outcome, summary FROM runs`;
+  >`SELECT command, finished_at, outcome, summary FROM runs WHERE command='retry'`;
+  expect(
+    (await testSql`SELECT outcome FROM runs WHERE id=${orphanId}::uuid`)[0],
+  ).toEqual({ outcome: "interrupted" });
   expect(run?.command).toBe("retry");
   expect(run?.finished_at).toBeInstanceOf(Date);
   expect(run?.outcome).toBe("succeeded");
@@ -1152,6 +1157,9 @@ function startFakeRetry(env: Record<string, string>) {
       ...(env.GMS_TEST_LOSE_SAVE_RECEIPT === "1"
         ? ["--preload", "./tests/helpers/lose-save-receipt.ts"]
         : []),
+      ...(env.GMS_TEST_LOSE_ARCHIVE_RECEIPT
+        ? ["--preload", "./tests/helpers/lose-archive-receipt.ts"]
+        : []),
       "src/cli.ts",
       "retry",
     ],
@@ -1623,6 +1631,263 @@ test.each(["断连", "停止不确定", "丢锁"])(
       expect(databaseClosed).toBe(true);
       const [run] = await testSql`SELECT finished_at, outcome FROM runs`;
       expect(run).toEqual({ finished_at: null, outcome: null });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+async function seedRetryArchives(root: string, ids: string[]) {
+  for (const id of ids)
+    await testSql`INSERT INTO post_work (post_id,goal,status) VALUES (${id},'archive','pending')`;
+  const saved = await runFakeRetry({
+    ...databaseEnv,
+    GROK_ARCHIVE_DIR: root,
+    GMS_TEST_MEDIA: "1",
+  });
+  expect(saved.exitCode, JSON.stringify(saved)).toBe(0);
+  await testSql`UPDATE post_work SET last_run_id=NULL`;
+  await testSql`DELETE FROM runs`;
+}
+
+test("P2-08 S2 混合未知与已移除补救共用许可且普通失败后继续", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-recovery-"));
+  const events = join(root, "requests");
+  const ids = Array.from(
+    { length: 4 },
+    (_, i) => `123e4567-e89b-42d3-a456-42661417400${i}`,
+  );
+  try {
+    await seedRetryArchives(root, [ids[0] as string, ids[1] as string]);
+    await testSql`UPDATE post_work SET archive_settled=false, removal_state='pending' WHERE post_id=${ids[0]}`;
+    await testSql`UPDATE post_work SET archive_settled=false WHERE post_id=${ids[1]}`;
+    const [version] =
+      await testSql`SELECT relative_path FROM media_versions WHERE post_id=${ids[1]}`;
+    await rm(join(root, version.relative_path));
+    await testSql`INSERT INTO post_work(post_id,goal,status) VALUES (${ids[2]},'save','failed'),(${ids[3]},'archive','pending')`;
+    const result = await runFakeRetry({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      GMS_TEST_MEDIA: "1",
+      GMS_TEST_REQUEST_EVENTS: events,
+      GMS_TEST_CHECK_STATUS: "404",
+      GMS_TEST_CHECK_BODY: JSON.stringify({
+        code: 5,
+        message: "Asset not found",
+      }),
+      GMS_TEST_UNAVAILABLE_ID: ids[2] as string,
+      GROK_API_INTERVAL_MIN_SECONDS: "0.03",
+      GROK_API_INTERVAL_MAX_SECONDS: "0.03",
+    });
+    expect(result.exitCode, JSON.stringify(result)).toBe(1);
+    const requests = (await readFile(events, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(
+      requests.map((request) => `${request.kind}:${request.postId}`),
+    ).toEqual([
+      `check:${ids[0]}`,
+      "media:",
+      `detail:${ids[2]}`,
+      `detail:${ids[3]}`,
+      `media:${ids[3]}`,
+      `delete:${ids[3]}`,
+    ]);
+    for (let i = 1; i < requests.length; i++)
+      expect(requests[i].at - requests[i - 1].at).toBeGreaterThanOrEqual(20);
+    const rows =
+      await testSql`SELECT goal,status,archive_settled FROM post_work ORDER BY post_id`;
+    expect(rows).toEqual([
+      { goal: "archive", status: "saved", archive_settled: true },
+      { goal: "archive", status: "saved", archive_settled: true },
+      { goal: "save", status: "failed", archive_settled: false },
+      { goal: "archive", status: "saved", archive_settled: true },
+    ]);
+    expect((await testSql`SELECT outcome,summary FROM runs`)[0]).toEqual({
+      outcome: "failed",
+      summary: { saved: 3, failed: 1, unprocessed: 0 },
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test.each(["intent", "settle", "recovered"])(
+  "P2-08 S2 %s提交已成功但丢回执不推进后项或收尾Run",
+  async (receipt) => {
+    await resetSchema();
+    const root = await mkdtemp(join(tmpdir(), "gms-retry-receipt-"));
+    const events = join(root, "requests");
+    try {
+      if (receipt === "recovered") {
+        await seedRetryArchives(root, [retryFirst]);
+        await testSql`UPDATE post_work SET archive_settled=false WHERE post_id=${retryFirst}`;
+      } else
+        await testSql`INSERT INTO post_work(post_id,goal,status) VALUES (${retryFirst},'archive','pending')`;
+      await testSql`INSERT INTO post_work(post_id,goal,status,last_error) VALUES (${retrySecond},'save','failed','保留未开始事实')`;
+      const [before] =
+        await testSql`SELECT * FROM post_work WHERE post_id=${retrySecond}`;
+      const result = await runFakeRetry({
+        ...databaseEnv,
+        GROK_ARCHIVE_DIR: root,
+        GMS_TEST_MEDIA: "1",
+        GMS_TEST_REQUEST_EVENTS: events,
+        GMS_TEST_LOSE_ARCHIVE_RECEIPT: receipt,
+      });
+      expect(result.exitCode, JSON.stringify(result)).toBe(1);
+      expect(result.stderr).toContain("未知");
+      expect(
+        (
+          await testSql`SELECT * FROM post_work WHERE post_id=${retrySecond}`
+        )[0],
+      ).toEqual(before);
+      expect((await testSql`SELECT finished_at,outcome FROM runs`)[0]).toEqual({
+        finished_at: null,
+        outcome: null,
+      });
+      if (receipt !== "recovered") {
+        const requests = (await readFile(events, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
+        expect(requests.map((request) => request.postId)).not.toContain(
+          retrySecond,
+        );
+        expect(
+          requests.filter((request) => request.kind === "delete").length,
+        ).toBe(receipt === "intent" ? 0 : 1);
+      }
+      const [work] =
+        await testSql`SELECT removal_state,archive_settled FROM post_work WHERE post_id=${retryFirst}`;
+      expect(work).toEqual(
+        receipt === "intent"
+          ? { removal_state: "pending", archive_settled: false }
+          : { removal_state: "removed", archive_settled: true },
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test("P2-08 S2 页面关闭失败仍断开连接与关闭DB且保留归档完成", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-cleanup-"));
+  const events = join(root, "browser-events");
+  try {
+    await testSql`INSERT INTO post_work(post_id,goal,status) VALUES (${retryFirst},'archive','pending'),(${retrySecond},'save','pending')`;
+    const before =
+      await testSql`SELECT * FROM post_work WHERE post_id=${retrySecond}`;
+    const result = await runFakeRetry({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      GMS_TEST_MEDIA: "1",
+      GMS_TEST_BROWSER_EVENTS: events,
+      GMS_TEST_CLOSE_FAILURE: "1",
+      GMS_TEST_DATABASE_CLOSE_FAILURE: "1",
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("浏览器清理失败");
+    expect(result.stderr).toContain("数据库关闭失败");
+    expect((await readFile(events, "utf8")).trim().split("\n")).toEqual([
+      "connect",
+      "close-page",
+      "close",
+    ]);
+    expect(
+      (
+        await testSql`SELECT archive_settled FROM post_work WHERE post_id=${retryFirst}`
+      )[0],
+    ).toEqual({ archive_settled: true });
+    expect(
+      await testSql`SELECT * FROM post_work WHERE post_id=${retrySecond}`,
+    ).toEqual(before);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("P2-08 S1 retry固定快照不纳入执行期新增工作且失败项不循环", async () => {
+  await resetSchema();
+  const root = await mkdtemp(join(tmpdir(), "gms-retry-snapshot-"));
+  try {
+    await testSql`INSERT INTO post_work(post_id,goal,status) VALUES (${retryFirst},'save','pending')`;
+    const requests: string[] = [];
+    const result = await retryUnfinishedPosts(
+      readDatabaseConfig(databaseEnv),
+      async (sql, timeout) => sql.close({ timeout }),
+      undefined,
+      () =>
+        readSaveConfig({
+          ...databaseEnv,
+          GROK_ARCHIVE_DIR: root,
+          PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+          GROK_API_INTERVAL_MIN_SECONDS: "0",
+          GROK_API_INTERVAL_MAX_SECONDS: "0",
+        }),
+      async () => ({
+        getPostDetail: async (id) => {
+          requests.push(id);
+          await testSql`INSERT INTO post_work(post_id,goal,status,last_error) VALUES (${retrySecond},'archive','pending','执行期间新增')`;
+          return { kind: "unavailable" as const, status: 404 };
+        },
+        close: async () => {},
+      }),
+    );
+    expect(result.status).toBe("failed");
+    expect(requests).toEqual([retryFirst]);
+    expect(
+      (
+        await testSql`SELECT status,last_run_id,last_error FROM post_work WHERE post_id=${retrySecond}`
+      )[0],
+    ).toEqual({
+      status: "pending",
+      last_run_id: null,
+      last_error: "执行期间新增",
+    });
+    expect((await testSql`SELECT summary FROM runs`)[0]).toEqual({
+      summary: { saved: 0, failed: 1, unprocessed: 0 },
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test.each(["阻挡", "停止"])(
+  "P2-08 S2 archive%s保留后项且结束本Run",
+  async (reason) => {
+    await resetSchema();
+    const root = await mkdtemp(join(tmpdir(), "gms-retry-stop-"));
+    const events = join(root, "requests");
+    try {
+      await testSql`INSERT INTO post_work(post_id,goal,status) VALUES (${retryFirst},'archive','pending'),(${retrySecond},'save','failed')`;
+      const before =
+        await testSql`SELECT * FROM post_work WHERE post_id=${retrySecond}`;
+      const result = await runFakeRetry({
+        ...databaseEnv,
+        GROK_ARCHIVE_DIR: root,
+        GMS_TEST_MEDIA: "1",
+        GMS_TEST_REQUEST_EVENTS: events,
+        ...(reason === "阻挡"
+          ? { GMS_TEST_DELETE_STATUS: "429" }
+          : { GMS_TEST_ABORT_DETAIL_ID: retryFirst }),
+      });
+      expect(result.exitCode, JSON.stringify(result)).toBe(
+        reason === "阻挡" ? 1 : 130,
+      );
+      expect(
+        await testSql`SELECT * FROM post_work WHERE post_id=${retrySecond}`,
+      ).toEqual(before);
+      const requests = (await readFile(events, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      expect(requests.every((request) => request.postId === retryFirst)).toBe(
+        true,
+      );
+      expect(requests.some((request) => request.kind === "check")).toBe(false);
     } finally {
       await rm(root, { recursive: true, force: true });
     }
