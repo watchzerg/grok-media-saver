@@ -322,7 +322,13 @@ export async function archivePost({
         if (result.remoteObservation === "removed")
           result.archiveRecorded = null;
         result.status = signal.aborted ? "cancelled" : "failed";
-        result.message = `${result.remoteObservation === "removed" ? "远端已确认移除，归档未结清；持久记账未确认" : "移除结果未知，待核对"}；已停止：${error instanceof Error ? error.message : String(error)}`;
+        const observationMessage =
+          result.remoteObservation === "removed"
+            ? "远端已确认移除，归档未结清；持久记账未确认"
+            : result.remoteObservation === "present"
+              ? "核对确认远端 Post 仍存在，归档未完成；保留原意图，本次不重发 DELETE"
+              : "移除结果未知，待核对";
+        result.message = `${observationMessage}；已停止：${error instanceof Error ? error.message : String(error)}`;
         // 断连、取消收尾不确定或丢锁后停止推进；不改写 Post 工作事实。
         result.fatalExecution = true;
         if (error instanceof UnconfirmedStopError)

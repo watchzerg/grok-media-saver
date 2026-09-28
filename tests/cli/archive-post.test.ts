@@ -1394,6 +1394,40 @@ test("P2-04 S1 认可GET之后丢锁保留远端观察，不改写待核对事�
   expect(result.message).not.toContain("移除结果未知");
 });
 
+test("P2-04 S1 认可仍存在GET之后丢锁保留存在说明和原意图", async () => {
+  await seedPendingArchive();
+  const before = await work();
+  const fake = checkOptions({
+    status: 200,
+    body: { assetId: postId, isDeleted: false },
+  });
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    new AbortController().signal,
+    undefined,
+    async () => ({
+      ...(await fake.connect()),
+      checkPost: async (id: string) => {
+        const raw = await (await fake.connect()).checkPost(id);
+        await testSql`SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype='advisory' AND granted AND classid=1297043787::oid AND objid=1::oid`;
+        return raw;
+      },
+    }),
+  );
+  expect(result).toMatchObject({
+    status: "failed",
+    remoteObservation: "present",
+    archiveRecorded: false,
+    fatalExecution: true,
+  });
+  expect(result.message).toContain("核对确认远端 Post 仍存在，归档未完成");
+  expect(result.message).toContain("已停止");
+  expect(result.message).not.toContain("移除结果未知");
+  expect(await work()).toEqual(before);
+  expect(fake.requests).toEqual([`check:${postId}`]);
+});
+
 test("P2-04 S1 结清发送前停止不写入，保留removed未结清", async () => {
   await seedPendingArchive();
   const fake = checkOptions();
