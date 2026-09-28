@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import type { SQL } from "bun";
 import {
   type InspectOptions,
@@ -58,6 +59,16 @@ export type VerifyResult = {
   status: "ok" | "failed";
   message: string;
   cleanupErrors: string[];
+  versionId?: string;
+  filePath?: string;
+  fileStatus?:
+    | "ok"
+    | "missing"
+    | "directory"
+    | "symlink"
+    | "mismatch"
+    | "failed";
+  archiveSettled?: boolean;
 };
 
 export type RetryResult = Omit<DatabaseResult, "status"> & {
@@ -689,17 +700,45 @@ export async function verifySavedPost(
     sql = connectDatabase(config);
     await verifySchema(sql);
     const [saved] = await sql<
-      { relativePath: string; byteCount: string; sha256: string }[]
+      {
+        relativePath: string | null;
+        byteCount: string | null;
+        sha256: string | null;
+        versionId: string | null;
+        deletionVersionId: string | null;
+        archiveSettled: boolean;
+      }[]
     >`
       SELECT m.relative_path AS "relativePath", m.byte_count::text AS "byteCount",
-        m.sha256
+        m.sha256, m.id::text AS "versionId",
+        w.deletion_media_version_id::text AS "deletionVersionId",
+        w.archive_settled AS "archiveSettled"
       FROM post_work w
-      JOIN media_versions m
-        ON m.post_id = w.post_id AND m.id = w.saved_media_version_id
+      LEFT JOIN media_versions m ON m.post_id = w.post_id
+        AND m.id = COALESCE(w.deletion_media_version_id, w.saved_media_version_id)
       WHERE w.post_id = ${postId}
     `;
     if (!saved) {
       result.message = `Post ${postId} 没有可核验的保存记录。`;
+    } else if (saved.deletionVersionId && !saved.versionId) {
+      result = {
+        status: "failed",
+        message: `Post ${postId} 的删除依据版本绑定异常，无法核验。`,
+        cleanupErrors: [],
+        archiveSettled: saved.archiveSettled,
+      };
+    } else if (
+      !saved.versionId ||
+      !saved.relativePath ||
+      !saved.byteCount ||
+      !saved.sha256
+    ) {
+      result = {
+        status: "failed",
+        message: `Post ${postId} 没有可核验的保存记录。`,
+        cleanupErrors: [],
+        archiveSettled: saved.archiveSettled,
+      };
     } else {
       const check = await checkArchiveFile(
         config.archiveRoot,
@@ -713,17 +752,33 @@ export async function verifySavedPost(
         symlink: "保存路径是符号链接。",
         mismatch: "文件大小或 SHA-256 与保存记录不符。",
       };
+      const filePath = resolve(config.archiveRoot, saved.relativePath);
+      const history = saved.archiveSettled ? "数据库已记录归档结清。" : "";
+      const currentResult =
+        check.status === "ok"
+          ? "当前文件核验通过。"
+          : `当前文件核验异常：${check.status === "failed" ? check.reason : detail[check.status]}`;
+      const settledText = history ? `${history} ` : "";
+      const message = `Post ${postId} 核验版本 ${saved.versionId}；当前位置 ${filePath}。${settledText}${currentResult}`;
       result =
         check.status === "ok"
           ? {
               status: "ok",
-              message: `Post ${postId} 文件核验通过。`,
+              message,
               cleanupErrors: [],
+              versionId: saved.versionId,
+              filePath,
+              fileStatus: "ok",
+              archiveSettled: saved.archiveSettled,
             }
           : {
               status: "failed",
-              message: `Post ${postId} 文件核验异常：${check.status === "failed" ? check.reason : detail[check.status]}`,
+              message,
               cleanupErrors: [],
+              versionId: saved.versionId,
+              filePath,
+              fileStatus: check.status,
+              archiveSettled: saved.archiveSettled,
             };
     }
   } catch (error) {

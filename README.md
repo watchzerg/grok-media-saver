@@ -79,7 +79,7 @@ mise exec -- bun src/cli.ts save post <Post-ID>
 
 ## 核验指定 Post 的本地文件
 
-`verify` 读取 PostgreSQL 中该 Post 的保存版本，并只在 `GROK_ARCHIVE_DIR` 当前目录下按记录的相对路径核对普通文件大小与 SHA-256。它不连接浏览器，不创建 Run，也不修复或改写保存状态。成功退出码为 `0`，核验异常为 `1`，参数或配置错误为 `2`。
+`verify` 有删除依据版本绑定时核验该版本，否则核验当前保存版本；只在 `GROK_ARCHIVE_DIR` 当前目录下按记录的相对路径核对文件大小与 SHA-256。输出核验版本、当前位置和本次文件结果，并单独展示数据库已记录的归档结清状态。它不连接浏览器，不创建 Run，也不修复或改写持久状态。成功退出码为 `0`，核验异常为 `1`，参数或配置错误为 `2`。
 
 ```sh
 mise exec -- bun src/cli.ts verify <Post-ID>

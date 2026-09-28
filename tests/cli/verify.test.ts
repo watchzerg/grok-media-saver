@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   open,
+  readFile,
   rm,
   symlink,
   writeFile,
@@ -11,10 +12,15 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  archiveSelectedPost,
   initializeProjectDatabase,
   verifySavedPost,
 } from "../../src/application-runtime";
-import { readDatabaseConfig, readVerifyConfig } from "../../src/config";
+import {
+  readDatabaseConfig,
+  readSaveConfig,
+  readVerifyConfig,
+} from "../../src/config";
 import { databaseEnv, testSql, useIsolatedPostgres } from "../helpers/postgres";
 
 useIsolatedPostgres();
@@ -62,6 +68,8 @@ test("verify reports a matching saved file through the real CLI", async () => {
     expect(result.exitCode, JSON.stringify(result)).toBe(0);
     expect(result.stdout).toContain(postId);
     expect(result.stdout).toContain("核验通过");
+    expect(result.stdout).toContain("223e4567-e89b-42d3-a456-426614174000");
+    expect(result.stdout).toContain(relativePath);
     expect(result.stderr).toBe("");
     expect(after).toEqual(before);
     expect(await Bun.file(filePath).text()).toBe(contents.toString());
@@ -72,6 +80,152 @@ test("verify reports a matching saved file through the real CLI", async () => {
     );
     expect(applicationResult.status).toBe("ok");
     expect(applicationResult.message).toContain("文件核验通过");
+  } finally {
+    await rm(archiveRoot, { recursive: true, force: true });
+  }
+});
+
+test("P2-10 S1/S2 核验删除绑定版本并独立报告结清终态", async () => {
+  await testSql`DROP TABLE IF EXISTS media_versions, post_work, runs CASCADE`;
+  expect(
+    (await initializeProjectDatabase(readDatabaseConfig(databaseEnv))).status,
+  ).toBe("ok");
+
+  const archiveRoot = await mkdtemp(join(tmpdir(), "gms-verify-bound-"));
+  const boundVersionId = "323e4567-e89b-42d3-a456-426614174000";
+  const currentVersionId = "423e4567-e89b-42d3-a456-426614174000";
+  const boundContents = Buffer.from("deletion bound media");
+  const currentContents = Buffer.from("later saved media");
+  const boundDigest = new Bun.CryptoHasher("sha256")
+    .update(boundContents)
+    .digest("hex");
+  const currentDigest = new Bun.CryptoHasher("sha256")
+    .update(currentContents)
+    .digest("hex");
+  const boundPath = `${postId}/${boundDigest}.png`;
+  const currentPath = `${postId}/${currentDigest}.png`;
+  await mkdir(join(archiveRoot, postId), { recursive: true });
+  await writeFile(join(archiveRoot, boundPath), boundContents);
+  await writeFile(join(archiveRoot, currentPath), currentContents);
+  await testSql`
+    INSERT INTO post_work (post_id, status) VALUES (${postId}, 'saved')
+  `;
+  await testSql`
+    INSERT INTO media_versions
+      (id, post_id, sha256, byte_count, mime_type, relative_path, saved_at)
+    VALUES
+      (${boundVersionId}, ${postId}, ${boundDigest}, ${boundContents.length}, 'image/png', ${boundPath}, now()),
+      (${currentVersionId}, ${postId}, ${currentDigest}, ${currentContents.length}, 'image/png', ${currentPath}, now())
+  `;
+  await testSql`
+    UPDATE post_work SET goal = 'archive', status = 'saved', removal_state = 'pending',
+      saved_media_version_id = ${currentVersionId}, deletion_media_version_id = ${boundVersionId}
+    WHERE post_id = ${postId}
+  `;
+
+  try {
+    const before = await readVerifyFacts();
+    const verified = await runCli(
+      { ...databaseEnv, GROK_ARCHIVE_DIR: archiveRoot },
+      ["verify", postId],
+    );
+    expect(verified.exitCode, JSON.stringify(verified)).toBe(0);
+    expect(verified.stdout).toContain(boundVersionId);
+    expect(verified.stdout).toContain(boundPath);
+    expect(verified.stdout).toContain("核验通过");
+    const applicationVerified = await verifySavedPost(
+      readVerifyConfig({ ...databaseEnv, GROK_ARCHIVE_DIR: archiveRoot }),
+      postId,
+    );
+    expect(applicationVerified).toMatchObject({
+      status: "ok",
+      versionId: boundVersionId,
+      filePath: join(archiveRoot, boundPath),
+      fileStatus: "ok",
+      archiveSettled: false,
+    });
+    expect(await readVerifyFacts()).toEqual(before);
+
+    await rm(join(archiveRoot, boundPath));
+    const boundFile = await readFile(join(archiveRoot, currentPath));
+    const missing = await runCli(
+      { ...databaseEnv, GROK_ARCHIVE_DIR: archiveRoot },
+      ["verify", postId],
+    );
+    expect(missing.exitCode, JSON.stringify(missing)).toBe(1);
+    expect(missing.stdout).toContain(boundVersionId);
+    expect(missing.stdout).toContain(boundPath);
+    expect(missing.stdout).toContain("文件缺失");
+    await expect(
+      verifySavedPost(
+        readVerifyConfig({ ...databaseEnv, GROK_ARCHIVE_DIR: archiveRoot }),
+        postId,
+      ),
+    ).resolves.toMatchObject({
+      status: "failed",
+      versionId: boundVersionId,
+      filePath: join(archiveRoot, boundPath),
+      fileStatus: "missing",
+      archiveSettled: false,
+    });
+    expect(await readVerifyFacts()).toEqual(before);
+    expect(await readFile(join(archiveRoot, currentPath))).toEqual(boundFile);
+  } finally {
+    await rm(archiveRoot, { recursive: true, force: true });
+  }
+});
+
+test("P2-10 S1/S2 已结清文件异常独立报告且归档仍直接跳过", async () => {
+  await testSql`DROP TABLE IF EXISTS media_versions, post_work, runs CASCADE`;
+  expect(
+    (await initializeProjectDatabase(readDatabaseConfig(databaseEnv))).status,
+  ).toBe("ok");
+  const archiveRoot = await mkdtemp(join(tmpdir(), "gms-verify-settled-"));
+  const versionId = "523e4567-e89b-42d3-a456-426614174000";
+  const relativePath = `${postId}/missing-after-settlement.png`;
+  await testSql`INSERT INTO post_work (post_id, status) VALUES (${postId}, 'saved')`;
+  await testSql`
+    INSERT INTO media_versions
+      (id, post_id, sha256, byte_count, mime_type, relative_path, saved_at)
+    VALUES (${versionId}, ${postId}, ${digest}, ${contents.length}, 'image/png', ${relativePath}, now())
+  `;
+  await testSql`
+    UPDATE post_work SET goal = 'archive', status = 'saved', removal_state = 'removed',
+      archive_settled = true, saved_media_version_id = ${versionId},
+      deletion_media_version_id = ${versionId} WHERE post_id = ${postId}
+  `;
+
+  try {
+    const before = await readVerifyFacts();
+    const result = await runCli(
+      { ...databaseEnv, GROK_ARCHIVE_DIR: archiveRoot },
+      ["verify", postId],
+    );
+    expect(result.exitCode, JSON.stringify(result)).toBe(1);
+    expect(result.stdout).toContain(versionId);
+    expect(result.stdout).toContain(relativePath);
+    expect(result.stdout).toContain("数据库已记录归档结清");
+    expect(result.stdout).toContain("文件缺失");
+    expect(await readVerifyFacts()).toEqual(before);
+
+    const archiveAgain = await archiveSelectedPost(
+      readSaveConfig({
+        ...databaseEnv,
+        GROK_ARCHIVE_DIR: archiveRoot,
+        PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+      }),
+      postId,
+      new AbortController().signal,
+      undefined,
+      async () => {
+        throw new Error("已结清归档不得连接远端");
+      },
+    );
+    expect(archiveAgain.status).toBe("ok");
+    expect(archiveAgain.message).toContain("直接跳过");
+    const afterArchive = await readVerifyFacts();
+    expect(afterArchive.work).toEqual(before.work);
+    expect(afterArchive.versions).toEqual(before.versions);
   } finally {
     await rm(archiveRoot, { recursive: true, force: true });
   }
@@ -301,6 +455,20 @@ async function readPersistedFacts() {
     FROM media_versions ORDER BY id
   `;
   return { runs, work, versions };
+}
+
+async function readVerifyFacts() {
+  const work = await testSql<unknown[]>`
+    SELECT post_id, goal, status, removal_state, archive_settled,
+      saved_media_version_id, deletion_media_version_id
+    FROM post_work WHERE post_id = ${postId}
+  `;
+  const versions = await testSql<unknown[]>`
+    SELECT id, post_id, sha256, byte_count, relative_path
+    FROM media_versions WHERE post_id = ${postId} ORDER BY id
+  `;
+  const runs = await testSql<unknown[]>`SELECT id FROM runs ORDER BY id`;
+  return { work, versions, runs };
 }
 
 async function seedVersion(relativePath: string) {
