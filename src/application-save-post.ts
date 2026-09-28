@@ -53,7 +53,11 @@ import { verifySchema } from "./store/schema";
 export type SavePostSession = {
   getPostDetail(postId: string, signal: AbortSignal): Promise<PostResponse>;
   downloadMedia?: MediaSource;
-  checkPost?(postId: string, signal: AbortSignal): Promise<RawCheckResponse>;
+  checkPost?(
+    postId: string,
+    signal: AbortSignal,
+    beforeRequest: () => Promise<void>,
+  ): Promise<RawCheckResponse>;
   deletePost?(postId: string, signal: AbortSignal): Promise<RawDeleteResponse>;
   close(): Promise<void>;
   cleanupNotices?: string[];
@@ -120,11 +124,14 @@ export async function archivePostInRun(
     const archived = await archivePost({
       postId,
       goal: options.goal,
-      checkPost: async (id, checkSignal) => {
+      checkPost: async (id, checkSignal, beforeRequest) => {
         browser ??= await options.connect(checkSignal);
         if (!browser.checkPost)
           throw new Error("浏览器会话不支持精确 Post 核对 GET。");
-        return parseCheckResponse(id, await browser.checkPost(id, checkSignal));
+        return parseCheckResponse(
+          id,
+          await browser.checkPost(id, checkSignal, beforeRequest),
+        );
       },
       deletePost: async (id, deleteSignal) => {
         if (!browser?.deletePost)

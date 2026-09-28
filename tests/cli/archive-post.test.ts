@@ -11,6 +11,7 @@ import {
 import { readDatabaseConfig, readSaveConfig } from "../../src/config";
 import {
   parsePostDetailResponse,
+  type RawCheckResponse,
   type RawDeleteResponse,
 } from "../../src/grok/adapter";
 import { databaseEnv, testSql, useIsolatedPostgres } from "../helpers/postgres";
@@ -96,7 +97,7 @@ test("P2-02 S2 新下载绑定精确版本并归档结清", async () => {
   expect(requests.at(-1)?.postId).toBe(postId);
 });
 
-test("P2-02 S2 发送前停止保留意图且不产生 DELETE", async () => {
+test("P2-04 S2 发送前停止保留意图，下次先GET核对并结清", async () => {
   const root = await seed();
   const marker = join(root, "marker");
   const events = join(root, "requests");
@@ -145,6 +146,24 @@ test("P2-02 S2 发送前停止保留意图且不产生 DELETE", async () => {
     const [work] =
       await testSql`SELECT removal_state, archive_settled FROM post_work WHERE post_id = ${postId}`;
     expect(work).toEqual({ removal_state: "pending", archive_settled: false });
+    const nextEvents = join(root, "recovery-requests");
+    const next = await cli({
+      ...removedCheckEnv,
+      GMS_TEST_REQUEST_EVENTS: nextEvents,
+    });
+    expect(next.exitCode, JSON.stringify(next)).toBe(0);
+    expect(
+      (await readFile(nextEvents, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line).kind),
+    ).toEqual(["check"]);
+    const [recovered] =
+      await testSql`SELECT removal_state, archive_settled FROM post_work WHERE post_id=${postId}`;
+    expect(recovered).toEqual({
+      removal_state: "removed",
+      archive_settled: true,
+    });
   } finally {
     if (child.exitCode === null) {
       process.kill(child.pid, "SIGCONT");
@@ -1155,12 +1174,20 @@ async function signalDelete(twice: boolean) {
     });
     if (twice) expect(stderr).toContain("已强制停止");
     else expect(stdout + stderr).toContain("归档已结清");
-    // 遗留意图或已结清事实保持可恢复；本票不添加核对 GET。
+    // 遗留意图统一核对；已结清事实直接跳过。
     const next = await cli({
       GMS_TEST_REQUEST_EVENTS: join(root, "next-requests"),
     });
     expect(next.stdout + next.stderr).toContain(twice ? "待核对" : "归档结清");
-    expect(await Bun.file(join(root, "next-requests")).exists()).toBe(false);
+    if (twice) {
+      expect(
+        (await readFile(join(root, "next-requests"), "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line).kind),
+      ).toEqual(["check"]);
+    } else
+      expect(await Bun.file(join(root, "next-requests")).exists()).toBe(false);
   } finally {
     if (child.exitCode === null) {
       process.kill(child.pid, "SIGKILL");
@@ -1282,13 +1309,18 @@ async function seedPendingArchive() {
   return root;
 }
 
-function checkOptions(raw: Partial<RawDeleteResponse> = {}) {
+function checkOptions(raw: Partial<RawCheckResponse> = {}) {
   const fake = options();
   return {
     requests: fake.requests,
     connect: async () => ({
       ...(await fake.connect()),
-      checkPost: async (id: string) => {
+      checkPost: async (
+        id: string,
+        _signal?: AbortSignal,
+        beforeRequest?: () => Promise<void>,
+      ) => {
+        await beforeRequest?.();
         fake.requests.push(`check:${id}`);
         return {
           status: 404,
@@ -1358,6 +1390,8 @@ test("P2-04 S1 认可GET之后丢锁保留远端观察，不改写待核对事�
     archive_settled: false,
   });
   expect(fake.requests).toEqual([`check:${postId}`]);
+  expect(result.message).toContain("远端已确认移除");
+  expect(result.message).not.toContain("移除结果未知");
 });
 
 test("P2-04 S1 结清发送前停止不写入，保留removed未结清", async () => {
@@ -1383,3 +1417,341 @@ test("P2-04 S1 结清发送前停止不写入，保留removed未结清", async (
     archive_settled: false,
   });
 });
+
+test.each([
+  { name: "任意404", raw: { body: { code: 6, message: "Asset not found" } } },
+  { name: "HTML", raw: { contentType: "text/html", body: "login" } },
+  {
+    name: "错误目标",
+    raw: {
+      finalUrl:
+        "https://grok.com/rest/assets/123e4567-e89b-42d3-a456-426614174001",
+    },
+  },
+  { name: "重定向", raw: { redirected: true } },
+  {
+    name: "异常isDeleted",
+    raw: { status: 200, body: { assetId: postId, isDeleted: true } },
+  },
+  { name: "不可靠认证", raw: { authenticationUnreliable: true } },
+  { name: "限流", raw: { status: 429, retryAfter: "60" } },
+  { name: "认证", raw: { status: 401 } },
+  { name: "challenge", raw: { finalUrl: "https://grok.com/challenge" } },
+])("P2-04 S1 原始GET $name 保留未知和原绑定且不追加请求", async ({ raw }) => {
+  await seedPendingArchive();
+  const before = await work();
+  const fake = checkOptions(raw);
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    new AbortController().signal,
+    undefined,
+    fake.connect,
+  );
+  expect(result).toMatchObject({
+    status: ["限流", "认证", "challenge"].includes(
+      raw.status === 429
+        ? "限流"
+        : raw.status === 401
+          ? "认证"
+          : raw.finalUrl?.includes("challenge")
+            ? "challenge"
+            : "",
+    )
+      ? "blocked"
+      : "failed",
+    remoteObservation: "unknown",
+    archiveRecorded: false,
+  });
+  expect(await work()).toEqual(before);
+  expect(fake.requests).toEqual([`check:${postId}`]);
+});
+
+test("P2-04 S1 isDeleted false 无媒体结构也确认存在，保留意图明确未完成", async () => {
+  await seedPendingArchive();
+  const before = await work();
+  const fake = checkOptions({
+    status: 200,
+    body: { assetId: postId, isDeleted: false },
+  });
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    new AbortController().signal,
+    undefined,
+    fake.connect,
+  );
+  expect(result).toMatchObject({
+    status: "failed",
+    remoteObservation: "present",
+    archiveRecorded: false,
+  });
+  expect(result.message).toContain("仍存在");
+  expect(await work()).toEqual(before);
+  expect(fake.requests).toEqual([`check:${postId}`]);
+});
+
+test.each(["missing", "conflict"])(
+  "P2-04 S1 GET确认移除后绑定文件%s保留removed未结清，正确文件恢复后无请求结清",
+  async (kind) => {
+    const root = await seedPendingArchive();
+    const [version] =
+      await testSql`SELECT relative_path FROM media_versions WHERE post_id=${postId}`;
+    const path = join(root, String(version?.relative_path));
+    if (kind === "missing") await rm(path);
+    else await writeFile(path, Buffer.alloc(media.length, 1));
+    const fake = checkOptions();
+    const result = await archiveSelectedPost(
+      config(),
+      postId,
+      new AbortController().signal,
+      undefined,
+      fake.connect,
+    );
+    expect(result).toMatchObject({
+      status: "failed",
+      remoteObservation: "removed",
+      archiveRecorded: false,
+    });
+    expect(await work()).toMatchObject({
+      removal_state: "removed",
+      archive_settled: false,
+    });
+    expect(fake.requests).toEqual([`check:${postId}`]);
+    const next = await archiveSelectedPost(
+      config(),
+      postId,
+      new AbortController().signal,
+      undefined,
+      fake.connect,
+    );
+    expect(next.status).toBe("failed");
+    expect(fake.requests).toEqual([`check:${postId}`]);
+    await writeFile(path, media);
+    const restored = await archiveSelectedPost(
+      config(),
+      postId,
+      new AbortController().signal,
+      undefined,
+      fake.connect,
+    );
+    expect(restored).toMatchObject({ status: "ok", archiveRecorded: true });
+    expect(fake.requests).toEqual([`check:${postId}`]);
+  },
+);
+
+const removedCheckEnv = {
+  GMS_TEST_CHECK_STATUS: "404",
+  GMS_TEST_CHECK_BODY: '{"code":5,"message":"Asset not found"}',
+};
+
+test.each(["confirm", "recovered"])(
+  "P2-04 S2 %s实际提交丢回执后停止，下次仅按真实DB恢复",
+  async (stage) => {
+    const root = await seedPendingArchive();
+    const events = join(root, "recovery-requests");
+    const result = await cli(
+      {
+        ...removedCheckEnv,
+        GMS_TEST_REQUEST_EVENTS: events,
+        GMS_TEST_LOSE_ARCHIVE_RECEIPT: stage,
+      },
+      postId,
+      ["./tests/helpers/lose-archive-receipt.ts"],
+    );
+    expect(result.exitCode, JSON.stringify(result)).toBe(1);
+    expect(result.stderr).toContain("提交结果未知");
+    expect(await work()).toMatchObject({
+      removal_state: "removed",
+      archive_settled: stage === "recovered",
+      last_error: null,
+    });
+    const [run] =
+      await testSql`SELECT finished_at, outcome FROM runs ORDER BY started_at DESC LIMIT 1`;
+    expect(run).toEqual({ finished_at: null, outcome: null });
+    const requests = (await readFile(events, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(requests.map((item) => item.kind)).toEqual(["check"]);
+    const resumed = await cli({ GMS_TEST_REQUEST_EVENTS: events });
+    expect(resumed.exitCode, JSON.stringify(resumed)).toBe(0);
+    expect((await work())?.archive_settled).toBe(true);
+    expect((await readFile(events, "utf8")).trim().split("\n")).toHaveLength(1);
+  },
+);
+
+test.each(["confirm", "recovered"])(
+  "P2-04 S2 %s事务未提交立即停止且不继续核验或追写",
+  async (stage) => {
+    const root = await seedPendingArchive();
+    const events = join(root, "recovery-requests");
+    await testSql.unsafe(
+      `CREATE FUNCTION reject_recovery_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF ${stage === "confirm" ? "NEW.removal_state = 'removed'" : "NEW.archive_settled"} THEN RAISE EXCEPTION '模拟恢复事务未提交'; END IF; RETURN NEW; END $$`,
+    );
+    await testSql`CREATE TRIGGER reject_recovery_write BEFORE UPDATE ON post_work FOR EACH ROW EXECUTE FUNCTION reject_recovery_write()`;
+    try {
+      const result = await cli({
+        ...removedCheckEnv,
+        GMS_TEST_REQUEST_EVENTS: events,
+      });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("提交结果未知");
+      expect(result.stdout).not.toContain(
+        stage === "confirm" ? "核验删除绑定文件" : "恢复归档结清已提交",
+      );
+      expect(await work()).toMatchObject({
+        removal_state: stage === "confirm" ? "pending" : "removed",
+        archive_settled: false,
+        last_error: null,
+      });
+      const [run] =
+        await testSql`SELECT finished_at, outcome FROM runs ORDER BY started_at DESC LIMIT 1`;
+      expect(run).toEqual({ finished_at: null, outcome: null });
+      expect(
+        (await readFile(events, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line).kind),
+      ).toEqual(["check"]);
+    } finally {
+      await testSql`DROP TRIGGER reject_recovery_write ON post_work`;
+      await testSql`DROP FUNCTION reject_recovery_write()`;
+    }
+  },
+);
+
+test("P2-04 S1 首次GET发送前停止，无新请求或Post写入", async () => {
+  await seedPendingArchive();
+  const before = await work();
+  const fake = checkOptions();
+  const controller = new AbortController();
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    controller.signal,
+    (stage) => {
+      if (stage === "核对精确 Post") controller.abort();
+    },
+    fake.connect,
+  );
+  expect(result.status).toBe("cancelled");
+  expect(fake.requests).toEqual([]);
+  expect(await work()).toEqual(before);
+});
+
+test("P2-04 S1 浏览器准备后丢锁，发送前再检查阻止GET", async () => {
+  await seedPendingArchive();
+  const before = await work();
+  const fake = checkOptions();
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    new AbortController().signal,
+    undefined,
+    async () => {
+      await testSql`SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype='advisory' AND granted AND classid=1297043787::oid AND objid=1::oid`;
+      return fake.connect();
+    },
+  );
+  expect(result).toMatchObject({ status: "failed", fatalExecution: true });
+  expect(fake.requests).toEqual([]);
+  expect(await work()).toEqual(before);
+});
+
+test("P2-04 S1 GET从发起到完整响应固定30秒，无回执停止推进并清理", async () => {
+  await seedPendingArchive();
+  const fake = checkOptions();
+  let requestSignal: AbortSignal | undefined;
+  let started = 0;
+  let closed = false;
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    new AbortController().signal,
+    undefined,
+    async () => ({
+      ...(await fake.connect()),
+      checkPost: async (
+        _id: string,
+        signal: AbortSignal,
+        beforeRequest: () => Promise<void>,
+      ) => {
+        await beforeRequest();
+        started = Date.now();
+        requestSignal = signal;
+        return new Promise<RawCheckResponse>(() => {});
+      },
+      close: async () => {
+        closed = true;
+      },
+    }),
+  );
+  expect(Date.now() - started).toBeGreaterThanOrEqual(29_900);
+  expect(Date.now() - started).toBeLessThan(33_000);
+  expect(requestSignal?.aborted).toBe(true);
+  expect(closed).toBe(true);
+  expect(result).toMatchObject({
+    status: "failed",
+    remoteObservation: "unknown",
+    fatalExecution: true,
+  });
+  expect(result.cleanupErrors.join(" ")).toContain("请求停止无法确认");
+  expect(await work()).toMatchObject({
+    removal_state: "pending",
+    archive_settled: false,
+  });
+}, 36_000);
+
+test("P2-04 S2 实际GET在途SIGINT取消请求，原意图保持未知", async () => {
+  const root = await seedPendingArchive();
+  const events = join(root, "check-events");
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--no-env-file",
+      "--preload",
+      "./tests/helpers/fake-save-browser.ts",
+      "src/cli.ts",
+      "archive",
+      "post",
+      postId,
+    ],
+    {
+      env: {
+        ...databaseEnv,
+        GROK_ARCHIVE_DIR: root,
+        PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture",
+        GROK_API_INTERVAL_MIN_SECONDS: "0",
+        GROK_API_INTERVAL_MAX_SECONDS: "0",
+        ...removedCheckEnv,
+        GMS_TEST_REQUEST_EVENTS: events,
+        GMS_TEST_CHECK_DELAY_MS: "10000",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  try {
+    const deadline = Date.now() + 5000;
+    while (!(await Bun.file(events).exists()) && Date.now() < deadline)
+      await Bun.sleep(10);
+    expect(await readFile(events, "utf8")).toContain('"check"');
+    process.kill(child.pid, "SIGINT");
+    const [stderr, code] = await Promise.all([
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(code, stderr).toBe(130);
+    expect(await work()).toMatchObject({
+      removal_state: "pending",
+      archive_settled: false,
+    });
+    expect((await readFile(events, "utf8")).trim().split("\n")).toHaveLength(1);
+  } finally {
+    if (child.exitCode === null) {
+      process.kill(child.pid, "SIGKILL");
+      await child.exited;
+    }
+  }
+}, 10000);

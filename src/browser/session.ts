@@ -28,7 +28,11 @@ export type BrowserSession = {
   getFirstPage(signal: AbortSignal): Promise<PageResponse>;
   getPostDetail(assetId: string, signal: AbortSignal): Promise<PostResponse>;
   downloadMedia: MediaSource;
-  checkPost(postId: string, signal: AbortSignal): Promise<RawCheckResponse>;
+  checkPost(
+    postId: string,
+    signal: AbortSignal,
+    beforeRequest: () => Promise<void>,
+  ): Promise<RawCheckResponse>;
   deletePost(postId: string, signal: AbortSignal): Promise<RawDeleteResponse>;
   isConnected(): boolean;
   closePage(): Promise<void>;
@@ -142,6 +146,7 @@ export async function connectBrowserSession(
     postId: string,
     signal: AbortSignal,
     method: "GET" | "DELETE",
+    beforeRequest?: () => Promise<void>,
   ): Promise<RawDeleteResponse> {
     if (closed || disconnected)
       throw new UnconfirmedStopError("Chrome Extension 连接已断开。");
@@ -157,6 +162,7 @@ export async function connectBrowserSession(
     const stopped = new Promise<never>((_, reject) => {
       rejectStopped = reject;
     });
+    void stopped.catch(() => {});
     const abort = () => {
       void closeOwnedPage().then(
         () => rejectStopped(new Error(`${method} 已停止；移除结果未知。`)),
@@ -169,9 +175,12 @@ export async function connectBrowserSession(
       );
     };
     signal.addEventListener("abort", abort, { once: true });
-    const timer = setTimeout(abort, API_TIMEOUT_MS);
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       if (signal.aborted) throw new Error(`归档已停止；未发起 ${method}。`);
+      await beforeRequest?.();
+      if (signal.aborted) throw new Error(`归档已停止；未发起 ${method}。`);
+      timer = setTimeout(abort, API_TIMEOUT_MS);
       onRequestStart();
       const raw = await Promise.race([
         deletePage.evaluate(
@@ -231,7 +240,7 @@ export async function connectBrowserSession(
     isConnected: () => !closed && !disconnected,
     closePage: closeOwnedPage,
     deletePost: (postId, signal) => requestAsset(postId, signal, "DELETE"),
-    async checkPost(postId, signal) {
+    async checkPost(postId, signal, beforeRequest) {
       if (closed || disconnected)
         throw new UnconfirmedStopError("Chrome Extension 连接已断开。");
       if (signal.aborted) throw new Error("核对已停止。");
@@ -261,7 +270,7 @@ export async function connectBrowserSession(
           throw error;
         }
       }
-      return requestAsset(postId, signal, "GET");
+      return requestAsset(postId, signal, "GET", beforeRequest);
     },
     async downloadMedia(selection, onResponse, onChunk, signal) {
       if (closed || disconnected)

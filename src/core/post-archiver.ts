@@ -76,7 +76,11 @@ export async function archivePost({
 }: {
   postId: string;
   goal?: "save" | "archive";
-  checkPost?: (postId: string, signal: AbortSignal) => Promise<CheckResponse>;
+  checkPost?: (
+    postId: string,
+    signal: AbortSignal,
+    beforeRequest: () => Promise<void>,
+  ) => Promise<CheckResponse>;
   deletePost?: (postId: string, signal: AbortSignal) => Promise<DeleteResponse>;
   files: FileCapabilities;
   signal: AbortSignal;
@@ -280,20 +284,31 @@ export async function archivePost({
       const deadline = new Promise<never>((_, reject) => {
         rejectDeadline = reject;
       });
-      const timer = setTimeout(() => {
-        controller.abort();
-        rejectDeadline(
-          new UnconfirmedStopError(
-            "核对 GET 超过 30 秒总期限；请求停止无法确认。",
-          ),
-        );
-      }, 30_000);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const beforeRequest = async () => {
+        await store.assertLock();
+        if (signal.aborted) throw new Error("核对已停止；未发起 GET。");
+        const bound = await store.readWork(postId);
+        if (
+          bound?.removalState !== "pending" ||
+          bound.deletionMediaVersionId !== versionId
+        )
+          throw new Error("发送前核对绑定发生变化，未发起 GET。");
+        timer = setTimeout(() => {
+          controller.abort();
+          rejectDeadline(
+            new UnconfirmedStopError(
+              "核对 GET 超过 30 秒总期限；请求停止无法确认。",
+            ),
+          );
+        }, 30_000);
+      };
       const abort = () => controller.abort();
       signal.addEventListener("abort", abort, { once: true });
       let observed: CheckResponse;
       try {
         observed = await Promise.race([
-          checkPost(postId, controller.signal),
+          checkPost(postId, controller.signal, beforeRequest),
           deadline,
         ]);
         if (signal.aborted) {
@@ -307,7 +322,7 @@ export async function archivePost({
         if (result.remoteObservation === "removed")
           result.archiveRecorded = null;
         result.status = signal.aborted ? "cancelled" : "failed";
-        result.message += ` ${error instanceof Error ? error.message : String(error)}`;
+        result.message = `${result.remoteObservation === "removed" ? "远端已确认移除，归档未结清；持久记账未确认" : "移除结果未知，待核对"}；已停止：${error instanceof Error ? error.message : String(error)}`;
         // 断连、取消收尾不确定或丢锁后停止推进；不改写 Post 工作事实。
         result.fatalExecution = true;
         if (error instanceof UnconfirmedStopError)

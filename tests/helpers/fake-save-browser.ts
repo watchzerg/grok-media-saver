@@ -166,6 +166,36 @@ mock.module("../../src/browser/session.ts", () => ({
             },
           }
         : {}),
+      checkPost: async (
+        postId: string,
+        signal: AbortSignal,
+        beforeRequest: () => Promise<void>,
+      ) => {
+        await beforeRequest();
+        recordRequest("check", postId);
+        if (process.env.GMS_TEST_CHECK_DELAY_MS) {
+          await new Promise<void>((resolve, reject) => {
+            const abort = () => {
+              clearTimeout(timer);
+              reject(new Error("核对请求已停止"));
+            };
+            const timer = setTimeout(() => {
+              signal.removeEventListener("abort", abort);
+              resolve();
+            }, Number(process.env.GMS_TEST_CHECK_DELAY_MS));
+            signal.addEventListener("abort", abort, { once: true });
+            if (signal.aborted) abort();
+          });
+        }
+        return {
+          status: Number(process.env.GMS_TEST_CHECK_STATUS ?? 503),
+          contentType: "application/json",
+          body: JSON.parse(process.env.GMS_TEST_CHECK_BODY ?? "{}"),
+          finalUrl: `https://grok.com/rest/assets/${postId}`,
+          method: "GET",
+          redirected: false,
+        };
+      },
       deletePost: async (postId: string) => {
         recordRequest("delete", postId);
         if (process.env.GMS_TEST_DELETE_DELAY_MS)
