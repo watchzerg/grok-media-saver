@@ -12,7 +12,11 @@ import {
   type RunSummary,
 } from "./core/run-summary";
 import { discardDownloadedTemp, downloadToTemp } from "./files/download";
-import { cleanupPublishedTemp, publishIntent } from "./files/publish-intent";
+import {
+  cleanupPublishedTemp,
+  PublishConflictError,
+  publishIntent,
+} from "./files/publish-intent";
 import { checkArchiveFile } from "./files/verify";
 import {
   type PostResponse,
@@ -45,6 +49,7 @@ import {
   clearMissingIntent,
   failDownload,
   failUnreadableDetail,
+  KnownSaveConflict,
   KnownSaveFailure,
   markFileNotReusable,
   markNeedsDownload,
@@ -187,8 +192,21 @@ export async function archivePostInRun(
           ),
         discardDownloadedTemp: (id, intent) =>
           discardDownloadedTemp(config.archiveRoot, id, intent),
-        publishIntent: (id, work, publishSignal, onStage) =>
-          publishIntent(config.archiveRoot, id, work, publishSignal, onStage),
+        publishIntent: async (id, work, publishSignal, onStage) => {
+          try {
+            return await publishIntent(
+              config.archiveRoot,
+              id,
+              work,
+              publishSignal,
+              onStage,
+            );
+          } catch (error) {
+            if (error instanceof PublishConflictError)
+              throw new KnownSaveConflict(error.message);
+            throw error;
+          }
+        },
         cleanupPublishedTemp: (id, work) =>
           cleanupPublishedTemp(config.archiveRoot, id, work),
       },
