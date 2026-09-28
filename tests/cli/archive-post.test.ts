@@ -982,3 +982,55 @@ test.each(["removed", "unknown"] as const)(
     }
   },
 );
+
+test("P2-03 S1 在途首次停止收集认可响应并结清，退出事实仍可见", async () => {
+  await seed();
+  const fake = options();
+  const controller = new AbortController();
+  let requestAborted = false;
+  let closed = false;
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    controller.signal,
+    undefined,
+    async () => ({
+      ...(await fake.connect()),
+      deletePost: async (id: string, signal: AbortSignal) => {
+        fake.requests.push(`delete:${id}`);
+        controller.abort();
+        await Bun.sleep(30);
+        requestAborted = signal.aborted;
+        if (signal.aborted) throw new Error("DELETE 响应被停止丢弃");
+        return {
+          status: 200,
+          contentType: "application/json",
+          body: {},
+          finalUrl: `https://grok.com/rest/assets/${id}`,
+          method: "DELETE",
+          redirected: false,
+        };
+      },
+      close: async () => {
+        closed = true;
+      },
+    }),
+  );
+  expect(result).toMatchObject({
+    status: "cancelled",
+    remoteObservation: "removed",
+    archiveRecorded: true,
+  });
+  expect(result.message).toContain("归档已结清");
+  expect(requestAborted).toBe(false);
+  expect(closed).toBe(true);
+  expect(fake.requests).toEqual([
+    `detail:${postId}`,
+    "media",
+    `delete:${postId}`,
+  ]);
+  expect(await work()).toMatchObject({
+    removal_state: "removed",
+    archive_settled: true,
+  });
+});

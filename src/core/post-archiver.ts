@@ -295,11 +295,7 @@ export async function archivePost({
     const stopped = new Promise<never>((_, reject) => {
       rejectStop = reject;
     });
-    const abort = () => {
-      controller.abort();
-      rejectStop(new Error("归档已停止；移除结果未知，待核对。"));
-    };
-    signal.addEventListener("abort", abort, { once: true });
+    // 发起后首次停止只禁止后续请求；当前 DELETE 继续使用原期限收集响应。
     timer = setTimeout(() => {
       controller.abort();
       rejectStop(new Error("DELETE 超过 30 秒总期限；移除结果未知，待核对。"));
@@ -317,7 +313,6 @@ export async function archivePost({
       return;
     } finally {
       if (timer) clearTimeout(timer);
-      signal.removeEventListener("abort", abort);
     }
     if (parsed.kind !== "removed") {
       result.status = parsed.kind === "blocked" ? "blocked" : "failed";
