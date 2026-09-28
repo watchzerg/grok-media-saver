@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import {
   chmod,
   mkdir,
@@ -14,6 +14,7 @@ import { join } from "node:path";
 import {
   initializeProjectDatabase,
   retryUnfinishedPosts,
+  verifySavedPost,
 } from "../../src/application-runtime";
 import { readDatabaseConfig, readSaveConfig } from "../../src/config";
 import {
@@ -1892,6 +1893,141 @@ test("P2 S1 已移除绑定文件新下载发布冲突后继续混合retry", asy
       )[0],
     ).toEqual({ status: "saved" });
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("P2 S1/S2 已移除绑定finalizing首次权限核验失败先停止且新Run恢复原绑定", async () => {
+  await resetSchema();
+  const root = await mkdtemp(
+    join(tmpdir(), "gms-retry-bound-finalizing-fault-"),
+  );
+  const events = join(root, "requests");
+  const tempName = ".bound-recovery.part";
+  let boundPath: string | undefined;
+  try {
+    await seedRetryArchives(root, [retryFirst]);
+    const [version] =
+      await testSql`SELECT * FROM media_versions WHERE post_id=${retryFirst}`;
+    boundPath = join(root, String(version.relative_path));
+    const bytes = await readFile(boundPath);
+    const tempPath = join(root, retryFirst, tempName);
+    await writeFile(tempPath, bytes);
+    await testSql`UPDATE post_work SET status='finalizing',archive_settled=false,
+      publish_temp_name=${tempName},publish_relative_path=${version.relative_path},
+      publish_expected_bytes=${version.byte_count},publish_sha256=${version.sha256}
+      WHERE post_id=${retryFirst}`;
+    await testSql`INSERT INTO post_work(post_id,goal,status) VALUES (${retrySecond},'save','pending')`;
+    const before = await testSql`SELECT * FROM post_work ORDER BY post_id`;
+    const saveConfig = readSaveConfig({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture-token",
+      GROK_API_INTERVAL_MIN_SECONDS: "0",
+      GROK_API_INTERVAL_MAX_SECONDS: "0",
+    });
+    await chmod(boundPath, 0);
+    expect((await verifySavedPost(saveConfig, retryFirst)).fileStatus).toBe(
+      "failed",
+    );
+    const requests: string[] = [];
+    const stages: string[] = [];
+    const result = await retryUnfinishedPosts(
+      readDatabaseConfig(databaseEnv),
+      undefined,
+      new AbortController().signal,
+      () => saveConfig,
+      async () => ({
+        getPostDetail: async (id) => {
+          requests.push(`detail:${id}`);
+          return { kind: "unavailable", status: 404 };
+        },
+        close: async () => {},
+      }),
+      (stage) => {
+        stages.push(stage);
+        // 若错误地进入发布恢复，权限会恢复；首次失败仍必须停止本 Run。
+        if (stage === "核对绑定发布意图" && boundPath)
+          chmodSync(boundPath, 0o600);
+      },
+    );
+    expect(result.status, result.message).toBe("failed");
+    expect(result.posts?.[0]?.result).toMatchObject({
+      status: "failed",
+      remoteObservation: "removed",
+      archiveRecorded: false,
+      fatalExecution: true,
+    });
+    expect(result.posts?.[0]?.result.message).toContain("绑定文件访问失败");
+    expect(result.summary).toEqual({
+      saved: 0,
+      archived: 0,
+      skipped: 0,
+      unconfirmed: 1,
+      unprocessed: 1,
+    });
+    expect(stages).toContain("核验删除绑定文件");
+    for (const stage of [
+      "核对绑定发布意图",
+      "同步正式文件",
+      "提交绑定保存结果",
+      "提交恢复归档结清",
+    ])
+      expect(stages).not.toContain(stage);
+    expect(requests).toEqual([]);
+    expect(await testSql`SELECT * FROM post_work ORDER BY post_id`).toEqual(
+      before,
+    );
+    expect(
+      await testSql`SELECT * FROM media_versions WHERE post_id=${retryFirst}`,
+    ).toEqual([version]);
+    expect((await testSql`SELECT finished_at,outcome FROM runs`)[0]).toEqual({
+      finished_at: null,
+      outcome: null,
+    });
+    expect(await readFile(tempPath)).toEqual(bytes);
+    expect((await verifySavedPost(saveConfig, retryFirst)).fileStatus).toBe(
+      "failed",
+    );
+
+    await chmod(boundPath, 0o600);
+    expect(await readFile(boundPath)).toEqual(bytes);
+    const recovered = await runFakeRetry({
+      ...databaseEnv,
+      GROK_ARCHIVE_DIR: root,
+      GMS_TEST_MEDIA: "1",
+      GMS_TEST_REQUEST_EVENTS: events,
+    });
+    expect(recovered.exitCode, JSON.stringify(recovered)).toBe(0);
+    expect(
+      (
+        await testSql`SELECT status,removal_state,archive_settled,saved_media_version_id,deletion_media_version_id,publish_temp_name FROM post_work WHERE post_id=${retryFirst}`
+      )[0],
+    ).toEqual({
+      status: "saved",
+      removal_state: "removed",
+      archive_settled: true,
+      saved_media_version_id: version.id,
+      deletion_media_version_id: version.id,
+      publish_temp_name: null,
+    });
+    expect(
+      await testSql`SELECT * FROM media_versions WHERE post_id=${retryFirst}`,
+    ).toEqual([version]);
+    expect(await readFile(boundPath)).toEqual(bytes);
+    expect(await readdir(join(root, retryFirst))).not.toContain(tempName);
+    const laterRequests = (await readFile(events, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(
+      laterRequests.map((request) => [request.postId, request.kind]),
+    ).toEqual([
+      [retrySecond, "detail"],
+      [retrySecond, "media"],
+    ]);
+  } finally {
+    if (boundPath) await chmod(boundPath, 0o600);
     await rm(root, { recursive: true, force: true });
   }
 });

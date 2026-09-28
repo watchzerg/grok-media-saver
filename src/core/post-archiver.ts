@@ -463,13 +463,17 @@ export async function archivePost({
       result.status = "cancelled";
       return;
     }
+    if (check.status === "failed") {
+      result.fatalExecution = true;
+      result.message = `远端已确认移除，绑定文件访问失败：${check.reason}；归档未结清。`;
+      return;
+    }
     if (check.status === "missing" || boundWork.status === "finalizing") {
       if (!(await restoreBoundFile(boundWork, version))) return;
       check = { status: "ok" };
     }
     if (check.status !== "ok") {
-      if (check.status === "failed") result.fatalExecution = true;
-      result.message = `远端已确认移除，绑定文件${check.status === "failed" ? `访问失败：${check.reason}` : "内容冲突或不符"}；归档未结清。`;
+      result.message = "远端已确认移除，绑定文件内容冲突或不符；归档未结清。";
       return;
     }
     try {
