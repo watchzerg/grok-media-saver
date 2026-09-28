@@ -420,7 +420,9 @@ test("P2-09 S1/S2 status reports unfinished archive facts and safe recovery hint
   expect(result.stdout).toContain("移除：pending");
   expect(result.stdout).toContain("结清：未结清");
   expect(result.stdout).toContain("最近错误：DELETE 回执未知");
-  expect(result.stdout).toContain("先核对远端");
+  expect(result.stdout).toContain(
+    `恢复提示：运行 archive post ${pendingRemoval} 或 retry；恢复流程会先核对同一远端目标。`,
+  );
   expect(result.stdout).toContain("绑定版本的本地核验或补救");
   expect(result.stdout).toContain("文件待核验");
   expect(result.stderr).toBe("");

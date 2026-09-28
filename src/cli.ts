@@ -100,7 +100,7 @@ export async function main(
         );
         if (post.removalState === "pending") {
           console.log(
-            `    恢复提示：先核对远端，再运行 archive post ${post.postId} 或 retry。`,
+            `    恢复提示：运行 archive post ${post.postId} 或 retry；恢复流程会先核对同一远端目标。`,
           );
         } else if (post.removalState === "removed" && !post.archiveSettled) {
           console.log(
