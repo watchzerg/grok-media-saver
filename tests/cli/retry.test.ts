@@ -1978,9 +1978,9 @@ test("P2 S1/S2 已移除绑定finalizing首次权限核验失败先停止且新R
     expect(await testSql`SELECT * FROM post_work ORDER BY post_id`).toEqual(
       before,
     );
-    expect(
-      await testSql`SELECT * FROM media_versions WHERE post_id=${retryFirst}`,
-    ).toEqual([version]);
+    const retainedVersions =
+      await testSql`SELECT * FROM media_versions WHERE post_id=${retryFirst}`;
+    expect(retainedVersions).toEqual([version]);
     expect((await testSql`SELECT finished_at,outcome FROM runs`)[0]).toEqual({
       finished_at: null,
       outcome: null,
@@ -2011,9 +2011,9 @@ test("P2 S1/S2 已移除绑定finalizing首次权限核验失败先停止且新R
       deletion_media_version_id: version.id,
       publish_temp_name: null,
     });
-    expect(
-      await testSql`SELECT * FROM media_versions WHERE post_id=${retryFirst}`,
-    ).toEqual([version]);
+    const recoveredVersions =
+      await testSql`SELECT * FROM media_versions WHERE post_id=${retryFirst}`;
+    expect(recoveredVersions).toEqual([version]);
     expect(await readFile(boundPath)).toEqual(bytes);
     expect(await readdir(join(root, retryFirst))).not.toContain(tempName);
     const laterRequests = (await readFile(events, "utf8"))
