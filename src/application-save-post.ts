@@ -251,6 +251,7 @@ export async function savePost(
   let lockAcquired = false;
   let runId: string | undefined;
   let runWriteUnknown = false;
+  let finishingRun = false;
   const result: SavePostResult = {
     status: "failed",
     message: "Post 保存未完成。",
@@ -260,9 +261,11 @@ export async function savePost(
   const reportStopAfterSave = () => {
     if (!signal.aborted || result.status === "cancelled") return;
     result.message =
-      result.status === "ok"
-        ? "保存已停止；Post 已保存。"
-        : `保存已停止；${result.message}`;
+      options.goal === "archive"
+        ? `归档已停止；${result.message}`
+        : result.status === "ok"
+          ? "保存已停止；Post 已保存。"
+          : `保存已停止；${result.message}`;
     result.status = "cancelled";
   };
   const write = async <T>(operation: () => Promise<T>): Promise<T> => {
@@ -306,6 +309,7 @@ export async function savePost(
     );
     Object.assign(result, postResult);
     if (runId && !result.fatalExecution) {
+      finishingRun = true;
       options.onStage?.("核对收尾执行器锁");
       await assertExecutorLock(session);
       options.onStage?.("收尾 Run");
@@ -320,9 +324,12 @@ export async function savePost(
     if (runWriteUnknown && result.saveRecorded === false)
       result.saveRecorded = null;
     result.status = signal.aborted && !runWriteUnknown ? "cancelled" : "failed";
-    result.message = runWriteUnknown
-      ? `数据库提交结果未知，已停止：${safeSaveError(error, config)}`
-      : `保存失败：${safeSaveError(error, config)}`;
+    result.message =
+      finishingRun && options.goal === "archive"
+        ? `${result.message} ${runWriteUnknown ? "Run 收尾提交结果未知，已停止" : "Run 收尾失败"}：${safeSaveError(error, config)}`
+        : runWriteUnknown
+          ? `数据库提交结果未知，已停止：${safeSaveError(error, config)}`
+          : `保存失败：${safeSaveError(error, config)}`;
     if (runId && session && !runWriteUnknown && !result.fatalExecution) {
       try {
         await assertExecutorLock(session);
@@ -365,8 +372,8 @@ export async function savePost(
     if (result.cleanupErrors.length && result.status === "ok") {
       result.status = "failed";
       result.message =
-        result.archiveRecorded === true
-          ? "归档已结清，但资源清理失败。"
+        options.goal === "archive"
+          ? `${result.message} 资源清理失败。`
           : "Post 已保存，但资源清理失败。";
     }
   }

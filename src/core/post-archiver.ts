@@ -151,7 +151,16 @@ export async function archivePost({
       saved = true;
       onStage?.("保存结果已提交");
       const cleanup = await files.cleanupPublishedTemp(postId, work);
-      if (cleanup) result.cleanupErrors.push(cleanup);
+      if (cleanup) {
+        result.cleanupErrors.push(cleanup);
+        result.status = "failed";
+        result.fatalExecution = true;
+        result.message =
+          goal === "archive"
+            ? "Post 已保存，归档未完成；尚未发起移除。文件清理失败，已停止后续处理。"
+            : "Post 已保存，但文件清理失败；已停止后续处理。";
+        return result;
+      }
     }
     work = await store.readWork(postId);
   }
@@ -427,7 +436,16 @@ export async function archivePost({
       saved = true;
       onStage?.("保存结果已提交");
       const cleanup = await files.cleanupPublishedTemp(postId, work);
-      if (cleanup) result.cleanupErrors.push(cleanup);
+      if (cleanup) {
+        result.cleanupErrors.push(cleanup);
+        result.status = "failed";
+        result.fatalExecution = true;
+        result.message =
+          goal === "archive"
+            ? "Post 已保存，归档未完成；尚未发起移除。文件清理失败，已停止后续处理。"
+            : "Post 已保存，但文件清理失败；已停止后续处理。";
+        return;
+      }
       result.status = "ok";
       result.message = "Post 保存完成。";
       return;

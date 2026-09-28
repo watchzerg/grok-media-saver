@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { chmodSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -865,3 +866,119 @@ test("P2-02 S1 已有逐资源期限的浏览器清理必须全部等待，不�
     cleanupErrors: [],
   });
 }, 8000);
+
+test.each(["新下载", "恢复发布意图"])(
+  "P2-02 S1 %s 保存后临时名权限故障保留保存事实并禁止 DELETE",
+  async (origin) => {
+    const root = await seed();
+    const fixture = options();
+    if (origin === "恢复发布意图") {
+      const digest = new Bun.CryptoHasher("sha256").update(media).digest("hex");
+      await mkdir(join(root, postId));
+      await writeFile(join(root, postId, ".recover.part"), media);
+      await testSql`INSERT INTO post_work (post_id, goal, status, selected_key, quality, publish_temp_name, publish_relative_path, publish_expected_bytes, publish_sha256, mime_type)
+      VALUES (${postId}, 'archive', 'finalizing', 'https://assets.grok.com/source.png', 'image', '.recover.part', ${`${postId}/${digest}.png`}, ${media.length}, ${digest}, 'image/png')`;
+    }
+    try {
+      const result = await archiveSelectedPost(
+        config(),
+        postId,
+        new AbortController().signal,
+        (stage) => {
+          if (stage === "保存结果已提交") chmodSync(join(root, postId), 0o500);
+        },
+        fixture.connect,
+      );
+      expect(result.cleanupErrors.join(" ")).toContain("临时文件清理失败");
+      expect(result.message).toContain("Post 已保存，归档未完成；尚未发起移除");
+      expect(fixture.requests).toEqual(
+        origin === "新下载" ? [`detail:${postId}`, "media"] : [],
+      );
+      expect(result).toMatchObject({
+        status: "failed",
+        saveRecorded: true,
+        archiveRecorded: false,
+        remoteObservation: "not-requested",
+      });
+      expect(await work()).toMatchObject({
+        status: "saved",
+        removal_state: "none",
+        archive_settled: false,
+      });
+    } finally {
+      chmodSync(join(root, postId), 0o700);
+    }
+  },
+);
+
+test("P2-02 S1 归档结清后的停止保留已确认远端和归档事实", async () => {
+  await seed();
+  const fixture = options();
+  const controller = new AbortController();
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    controller.signal,
+    (stage) => {
+      if (stage === "核对收尾执行器锁") controller.abort();
+    },
+    fixture.connect,
+  );
+  expect(result).toMatchObject({
+    status: "cancelled",
+    archiveRecorded: true,
+    remoteObservation: "removed",
+  });
+  expect(result.message).toContain("归档已结清");
+  expect(result.message).toContain("远端已确认移除");
+  expect(await work()).toMatchObject({
+    archive_settled: true,
+    removal_state: "removed",
+  });
+});
+
+test.each(["removed", "unknown"] as const)(
+  "P2-02 S1/S2 Run 收尾提交失败单独报告且保留 %s 事实",
+  async (observation) => {
+    await seed();
+    await testSql.unsafe(
+      `CREATE FUNCTION reject_run_finish() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.finished_at IS NOT NULL THEN RAISE EXCEPTION '受控 Run 收尾失败'; END IF; RETURN NEW; END $$`,
+    );
+    await testSql`CREATE TRIGGER reject_run_finish BEFORE UPDATE ON runs FOR EACH ROW EXECUTE FUNCTION reject_run_finish()`;
+    try {
+      const result = await archiveSelectedPost(
+        config(),
+        postId,
+        new AbortController().signal,
+        undefined,
+        options(
+          observation === "unknown"
+            ? { raw: { body: { unexpected: true } } }
+            : {},
+        ).connect,
+      );
+      expect(result).toMatchObject({
+        status: "failed",
+        archiveRecorded: observation === "removed",
+        remoteObservation: observation,
+      });
+      expect(result.message).toContain(
+        observation === "removed" ? "归档已结清" : "移除结果未知",
+      );
+      expect(result.message).toContain("Run 收尾提交结果未知");
+      expect(await work()).toMatchObject({
+        archive_settled: observation === "removed",
+        removal_state: observation === "removed" ? "removed" : "pending",
+      });
+      const output = await cli();
+      expect(output.exitCode).toBe(1);
+      expect(output.stderr).toContain(
+        observation === "removed" ? "归档结清" : "移除结果未知",
+      );
+      expect(output.stderr).toContain("Run 收尾提交结果未知");
+    } finally {
+      await testSql`DROP TRIGGER reject_run_finish ON runs`;
+      await testSql`DROP FUNCTION reject_run_finish()`;
+    }
+  },
+);
