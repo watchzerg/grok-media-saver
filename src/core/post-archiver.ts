@@ -298,6 +298,10 @@ export async function archivePost({
     // 发起后首次停止只禁止后续请求；当前 DELETE 继续使用原期限收集响应。
     timer = setTimeout(() => {
       controller.abort();
+      // 期限到期只发出取消要求，不能据此确认浏览器请求或远端副作用已停止。
+      result.cleanupErrors.push(
+        "DELETE 请求停止无法确认；已停止工作推进并继续独立资源清理，页面取消不证明远端撤销。",
+      );
       rejectStop(new Error("DELETE 超过 30 秒总期限；移除结果未知，待核对。"));
     }, 30_000);
     let parsed: DeleteResponse;

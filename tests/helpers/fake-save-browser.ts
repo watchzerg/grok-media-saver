@@ -168,6 +168,8 @@ mock.module("../../src/browser/session.ts", () => ({
         : {}),
       deletePost: async (postId: string) => {
         recordRequest("delete", postId);
+        if (process.env.GMS_TEST_DELETE_DELAY_MS)
+          await Bun.sleep(Number(process.env.GMS_TEST_DELETE_DELAY_MS));
         return {
           status: Number(process.env.GMS_TEST_DELETE_STATUS ?? 200),
           contentType:

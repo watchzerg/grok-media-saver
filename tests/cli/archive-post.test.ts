@@ -1034,3 +1034,242 @@ test("P2-03 S1 在途首次停止收集认可响应并结清，退出事实仍�
     archive_settled: true,
   });
 });
+
+test("P2-03 S1 进行20秒后首停仍在原30秒到期，取消无法确认时停止记账并独立清理", async () => {
+  await seed();
+  const fake = options();
+  const controller = new AbortController();
+  let requestSignal: AbortSignal | undefined;
+  let deleteStarted = 0;
+  let closed = false;
+  let firstStop: ReturnType<typeof setTimeout> | undefined;
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    controller.signal,
+    undefined,
+    async () => ({
+      ...(await fake.connect()),
+      deletePost: async (id: string, signal: AbortSignal) => {
+        fake.requests.push(`delete:${id}`);
+        requestSignal = signal;
+        deleteStarted = Date.now();
+        firstStop = setTimeout(() => controller.abort(), 20_000);
+        return new Promise<RawDeleteResponse>(() => {});
+      },
+      close: async () => {
+        closed = true;
+      },
+    }),
+  );
+  clearTimeout(firstStop);
+  expect(Date.now() - deleteStarted).toBeGreaterThanOrEqual(29_900);
+  expect(Date.now() - deleteStarted).toBeLessThan(33_000);
+  expect(requestSignal?.aborted).toBe(true);
+  expect(result).toMatchObject({
+    status: "cancelled",
+    remoteObservation: "unknown",
+    fatalExecution: true,
+  });
+  expect(result.cleanupErrors.join(" ")).toContain("DELETE 请求停止无法确认");
+  expect(closed).toBe(true);
+  expect(fake.requests).toEqual([
+    `detail:${postId}`,
+    "media",
+    `delete:${postId}`,
+  ]);
+  expect(await work()).toMatchObject({
+    removal_state: "pending",
+    archive_settled: false,
+  });
+  const [run] =
+    await testSql`SELECT outcome FROM runs ORDER BY started_at DESC LIMIT 1`;
+  expect(run?.outcome).toBe(null);
+  expect(
+    await testSql`SELECT * FROM pg_locks WHERE locktype = 'advisory' AND granted AND classid = 1297043787::oid AND objid = 1::oid`,
+  ).toHaveLength(0);
+}, 36_000);
+
+async function signalDelete(twice: boolean) {
+  const root = await seed();
+  const events = join(root, "requests");
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--no-env-file",
+      "--preload",
+      "./tests/helpers/fake-save-browser.ts",
+      "src/cli.ts",
+      "archive",
+      "post",
+      postId,
+    ],
+    {
+      env: {
+        ...databaseEnv,
+        GROK_ARCHIVE_DIR: root,
+        PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture",
+        GROK_API_INTERVAL_MIN_SECONDS: "0",
+        GROK_API_INTERVAL_MAX_SECONDS: "0",
+        GMS_TEST_MEDIA: "1",
+        GMS_TEST_REQUEST_EVENTS: events,
+        GMS_TEST_DELETE_DELAY_MS: twice ? "10000" : "600",
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  try {
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      if (
+        (await Bun.file(events).exists()) &&
+        (await readFile(events, "utf8")).includes('"delete"')
+      )
+        break;
+      await Bun.sleep(10);
+    }
+    expect(await readFile(events, "utf8")).toContain('"delete"');
+    process.kill(child.pid, "SIGINT");
+    await Bun.sleep(80);
+    expect(child.exitCode).toBe(null);
+    if (twice) process.kill(child.pid, "SIGINT");
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(code, stderr).toBe(130);
+    const requests = (await readFile(events, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(requests.map((item) => item.kind)).toEqual([
+      "detail",
+      "media",
+      "delete",
+    ]);
+    expect(await work()).toMatchObject({
+      removal_state: twice ? "pending" : "removed",
+      archive_settled: !twice,
+    });
+    if (twice) expect(stderr).toContain("已强制停止");
+    else expect(stdout + stderr).toContain("归档已结清");
+    // 遗留意图或已结清事实保持可恢复；本票不添加核对 GET。
+    const next = await cli({
+      GMS_TEST_REQUEST_EVENTS: join(root, "next-requests"),
+    });
+    expect(next.stdout + next.stderr).toContain(twice ? "待核对" : "归档结清");
+    expect(await Bun.file(join(root, "next-requests")).exists()).toBe(false);
+  } finally {
+    if (child.exitCode === null) {
+      process.kill(child.pid, "SIGKILL");
+      await child.exited;
+    }
+  }
+}
+test(
+  "P2-03 S2 在途真实首次 SIGINT 保留响应和结清事实并退出130",
+  () => signalDelete(false),
+  15000,
+);
+test(
+  "P2-03 S2 在途真实第二次 SIGINT 立即退出130并保留待核对意图",
+  () => signalDelete(true),
+  15000,
+);
+
+test("P2-03 S1 首停收集认可响应后丢锁只报告远端事实，不继续 Post 记账", async () => {
+  await seed();
+  const fake = options();
+  const controller = new AbortController();
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    controller.signal,
+    undefined,
+    async () => ({
+      ...(await fake.connect()),
+      deletePost: async (id: string) => {
+        fake.requests.push(`delete:${id}`);
+        controller.abort();
+        await testSql`SELECT pg_terminate_backend(pid) FROM pg_locks WHERE locktype = 'advisory' AND granted AND classid = 1297043787::oid AND objid = 1::oid`;
+        return {
+          status: 200,
+          contentType: "application/json",
+          body: {},
+          finalUrl: `https://grok.com/rest/assets/${id}`,
+          method: "DELETE",
+          redirected: false,
+        };
+      },
+    }),
+  );
+  expect(result).toMatchObject({
+    status: "cancelled",
+    remoteObservation: "removed",
+    archiveRecorded: null,
+    fatalExecution: true,
+  });
+  expect(await work()).toMatchObject({
+    removal_state: "pending",
+    archive_settled: false,
+  });
+  expect(fake.requests).toEqual([
+    `detail:${postId}`,
+    "media",
+    `delete:${postId}`,
+  ]);
+});
+
+test("P2-03 S2 删除意图后的真实许可等待可停止，保留意图且不发送", async () => {
+  const root = await seed();
+  const events = join(root, "requests");
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--no-env-file",
+      "--preload",
+      "./tests/helpers/fake-save-browser.ts",
+      "src/cli.ts",
+      "archive",
+      "post",
+      postId,
+    ],
+    {
+      env: {
+        ...databaseEnv,
+        GROK_ARCHIVE_DIR: root,
+        PLAYWRIGHT_MCP_EXTENSION_TOKEN: "fixture",
+        GROK_API_INTERVAL_MIN_SECONDS: "0.5",
+        GROK_API_INTERVAL_MAX_SECONDS: "0.5",
+        GMS_TEST_MEDIA: "1",
+        GMS_TEST_REQUEST_EVENTS: events,
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  try {
+    const deadline = Date.now() + 5000;
+    while ((await work())?.removal_state !== "pending" && Date.now() < deadline)
+      await Bun.sleep(10);
+    expect((await work())?.removal_state).toBe("pending");
+    process.kill(child.pid, "SIGINT");
+    const [stderr, code] = await Promise.all([
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect(code, stderr).toBe(130);
+    expect(await readFile(events, "utf8")).not.toContain('"delete"');
+    expect(await work()).toMatchObject({
+      removal_state: "pending",
+      archive_settled: false,
+    });
+  } finally {
+    if (child.exitCode === null) {
+      process.kill(child.pid, "SIGKILL");
+      await child.exited;
+    }
+  }
+}, 10000);
