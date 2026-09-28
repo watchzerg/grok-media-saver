@@ -330,7 +330,7 @@ async function work() {
   return row;
 }
 
-test("P2-02 S1 显式提升 save 并核验复用同一版本，终态跳过不访问资源", async () => {
+test("P2-02 P2-11 S1 显式提升 save 并核验复用同一版本，终态跳过不访问资源", async () => {
   await seed();
   const firstOptions = options();
   expect(
@@ -359,6 +359,14 @@ test("P2-02 S1 显式提升 save 并核验复用同一版本，终态跳过不�
     saveRecorded: true,
     archiveRecorded: true,
     remoteObservation: "removed",
+    summary: {
+      saved: 0,
+      archived: 1,
+      skipped: 0,
+      unconfirmed: 0,
+      unprocessed: 0,
+    },
+    summaryRecorded: true,
   });
   expect(archiveOptions.requests).toEqual([
     `detail:${postId}`,
@@ -378,6 +386,14 @@ test("P2-02 S1 显式提升 save 并核验复用同一版本，终态跳过不�
     },
   );
   expect(again.status).toBe("ok");
+  expect(again.summary).toEqual({
+    saved: 0,
+    archived: 0,
+    skipped: 1,
+    unconfirmed: 0,
+    unprocessed: 0,
+  });
+  expect(again.summaryRecorded).toBe(true);
   expect(again.message).toContain("直接跳过");
   expect(await work()).toEqual(after);
 });

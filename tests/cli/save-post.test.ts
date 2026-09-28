@@ -978,7 +978,7 @@ test("known save transaction rollback leaves the published file and intent for t
   expect(count?.count).toBe(1);
 });
 
-test("temp cleanup failure keeps saved fact and reports failure", async () => {
+test("P2-11 S1 保存后文件清理失败保留保存完成分类", async () => {
   const config = await seed();
   await writeFile(join(config.archiveRoot, relativePath), bytes);
   await writeFile(join(config.archiveRoot, postId, tempName), bytes);
@@ -989,6 +989,13 @@ test("temp cleanup failure keeps saved fact and reports failure", async () => {
     expect(result.status).toBe("failed");
     expect(result.message).toContain("已保存");
     expect(result.saveRecorded).toBe(true);
+    expect(result.summary).toEqual({
+      saved: 1,
+      archived: 0,
+      skipped: 0,
+      unconfirmed: 0,
+      unprocessed: 0,
+    });
     expect(result.cleanupErrors.join(" ")).toContain("清理失败");
     const [work] = await testSql<
       { status: string }[]

@@ -274,8 +274,10 @@ function formatRunCounts(
 ): string | null {
   if (!summary) return null;
   const labels: Record<string, string> = {
-    saved: "已保存",
-    failed: "失败",
+    saved: "保存完成",
+    archived: "归档完成",
+    skipped: "已结清跳过",
+    unconfirmed: "未确认完成",
     unprocessed: "未处理",
   };
   const parts = Object.entries(labels).flatMap(([key, label]) => {
@@ -284,7 +286,7 @@ function formatRunCounts(
       ? [`${label} ${value}`]
       : [];
   });
-  return parts.length > 0 ? parts.join("，") : null;
+  return parts.length === 5 ? parts.join("，") : null;
 }
 
 if (import.meta.main) {

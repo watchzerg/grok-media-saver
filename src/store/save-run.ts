@@ -1,4 +1,5 @@
 import type { ReservedSQL } from "bun";
+import type { RunSummary } from "../core/run-summary";
 
 export async function interruptOrphanedRuns(
   session: ReservedSQL,
@@ -22,11 +23,12 @@ export async function finishSaveRun(
   session: ReservedSQL,
   runId: string,
   status: "ok" | "blocked" | "failed" | "cancelled",
+  summary: RunSummary,
 ): Promise<void> {
   await session`
     UPDATE runs SET finished_at = now(),
       outcome = ${status === "ok" ? "succeeded" : status === "cancelled" ? "stopped" : "failed"},
-      summary = ${status === "ok" ? JSON.stringify({ saved: 1, failed: 0, unprocessed: 0 }) : null}::jsonb
+      summary = ${summary}::jsonb
     WHERE id = ${runId}::uuid
   `;
 }
@@ -35,9 +37,10 @@ export async function failSaveRun(
   session: ReservedSQL,
   runId: string,
   stopped: boolean,
+  summary: RunSummary,
 ): Promise<void> {
   await session`
-    UPDATE runs SET finished_at = now(), outcome = ${stopped ? "stopped" : "failed"}
+    UPDATE runs SET finished_at = now(), outcome = ${stopped ? "stopped" : "failed"}, summary = ${summary}::jsonb
     WHERE id = ${runId}::uuid AND finished_at IS NULL
   `;
 }

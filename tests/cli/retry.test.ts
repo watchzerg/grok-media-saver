@@ -36,7 +36,9 @@ test("P2-08 S2 空retry只需DB并接管遗留Run后记录零目标Run", async (
   const result = await runCli(databaseEnv, ["retry"]);
   expect(result.exitCode, JSON.stringify(result)).toBe(0);
   expect(result.stdout).toContain("没有未完成 Post");
-  expect(result.stdout).toContain("已保存 0，失败 0，未处理 0");
+  expect(result.stdout).toContain(
+    "保存完成 0，归档完成 0，已结清跳过 0，未确认完成 0，未处理 0",
+  );
   expect(result.stdout).not.toContain("阶段：");
   expect(result.stderr).toBe("");
 
@@ -54,12 +56,18 @@ test("P2-08 S2 空retry只需DB并接管遗留Run后记录零目标Run", async (
   expect(run?.command).toBe("retry");
   expect(run?.finished_at).toBeInstanceOf(Date);
   expect(run?.outcome).toBe("succeeded");
-  expect(run?.summary).toEqual({ saved: 0, failed: 0, unprocessed: 0 });
+  expect(run?.summary).toEqual({
+    saved: 0,
+    archived: 0,
+    skipped: 0,
+    unconfirmed: 0,
+    unprocessed: 0,
+  });
 
   const status = await runCli(databaseEnv, ["status"]);
   expect(status.exitCode).toBe(0);
   expect(status.stdout).toContain("结果：succeeded");
-  expect(status.stdout).toContain("已保存 0");
+  expect(status.stdout).toContain("保存完成 0");
 });
 
 test("competing retry subprocesses share one database lock regardless of archive root", async () => {
@@ -107,7 +115,13 @@ test("SIGINT stops retry with exit 130 and records its Run before cleanup", asyn
     >`SELECT finished_at, outcome, summary FROM runs`;
     expect(run?.finished_at).toBeInstanceOf(Date);
     expect(run?.outcome).toBe("stopped");
-    expect(run?.summary).toEqual({ saved: 0, failed: 0, unprocessed: 0 });
+    expect(run?.summary).toEqual({
+      saved: 0,
+      archived: 0,
+      skipped: 0,
+      unconfirmed: 0,
+      unprocessed: 0,
+    });
   } finally {
     await dropRetryDelayTrigger();
   }
@@ -129,7 +143,13 @@ test("SIGINT during Run completion returns 130 while keeping the committed succe
     >`SELECT finished_at, outcome, summary FROM runs`;
     expect(run?.finished_at).toBeInstanceOf(Date);
     expect(run?.outcome).toBe("succeeded");
-    expect(run?.summary).toEqual({ saved: 0, failed: 0, unprocessed: 0 });
+    expect(run?.summary).toEqual({
+      saved: 0,
+      archived: 0,
+      skipped: 0,
+      unconfirmed: 0,
+      unprocessed: 0,
+    });
   } finally {
     await dropRetryFinishDelayTrigger();
   }
@@ -163,7 +183,7 @@ test("retry does not compensate after a failed Run completion write", async () =
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("结果未知");
     expect(result.stderr).toContain(
-      "已确认处理：已保存 0，失败 0；剩余 0 项结果未确认",
+      "保存完成 0，归档完成 0，已结清跳过 0，未确认完成 0，未处理 0",
     );
     const [run] = await testSql<
       { outcome: string | null; finished_at: Date | null }[]
@@ -217,9 +237,9 @@ test("retry saves a failed Post through the CLI and records its result", async (
     expect(result.stdout).toContain("阶段：读取当前详情。");
     expect(result.stdout).toContain("阶段：下载当前媒体。");
     expect(result.stdout.indexOf("阶段：读取当前详情。")).toBeLessThan(
-      result.stdout.indexOf("已保存 1"),
+      result.stdout.indexOf("保存完成 1"),
     );
-    expect(result.stdout).toContain("已保存 1");
+    expect(result.stdout).toContain("保存完成 1");
     expect(`${result.stdout}${result.stderr}`).not.toContain("fixture-token");
     expect(`${result.stdout}${result.stderr}`).not.toContain(
       databaseEnv.GROK_DB_PASSWORD,
@@ -229,7 +249,13 @@ test("retry saves a failed Post through the CLI and records its result", async (
     >`SELECT finished_at, outcome, summary FROM runs`;
     expect(run?.finished_at).toBeInstanceOf(Date);
     expect(run?.outcome).toBe("succeeded");
-    expect(run?.summary).toEqual({ saved: 1, failed: 0, unprocessed: 0 });
+    expect(run?.summary).toEqual({
+      saved: 1,
+      archived: 0,
+      skipped: 0,
+      unconfirmed: 0,
+      unprocessed: 0,
+    });
     const [work] = await testSql<
       { status: string }[]
     >`SELECT status FROM post_work`;
@@ -274,7 +300,9 @@ test("retry fixes its initial set, continues ordinary failure, and saves image a
       GMS_TEST_VIDEO_ID: ids[2],
     });
     expect(result.exitCode, result.stderr).toBe(1);
-    expect(result.stderr).toContain("已保存 2，失败 1，未处理 0");
+    expect(result.stderr).toContain(
+      "保存完成 2，归档完成 0，已结清跳过 0，未确认完成 1，未处理 0",
+    );
     expect((await readFile(detailLog, "utf8")).trim().split("\n")).toEqual(
       ids.slice(0, 3),
     );
@@ -291,7 +319,13 @@ test("retry fixes its initial set, continues ordinary failure, and saves image a
       SELECT outcome, summary FROM runs WHERE command = 'retry'`;
     expect(run).toEqual({
       outcome: "failed",
-      summary: { saved: 2, failed: 1, unprocessed: 0 },
+      summary: {
+        saved: 2,
+        archived: 0,
+        skipped: 0,
+        unconfirmed: 1,
+        unprocessed: 0,
+      },
     });
     const files = await testSql<
       { mime_type: string }[]
@@ -321,7 +355,9 @@ test("retry continues after a Post detail network failure exhausts its retry", a
       GMS_TEST_NETWORK_FAILURE_ID: first,
     });
     expect(result.exitCode, result.stderr).toBe(1);
-    expect(result.stderr).toContain("已保存 1，失败 1，未处理 0");
+    expect(result.stderr).toContain(
+      "保存完成 1，归档完成 0，已结清跳过 0，未确认完成 1，未处理 0",
+    );
     expect((await readFile(detailLog, "utf8")).trim().split("\n")).toEqual([
       first,
       first,
@@ -379,8 +415,8 @@ test.each([
       expect(result.exitCode, result.stderr).toBe(1);
       expect(result.stderr).toContain(
         closeFailure
-          ? "已保存 0，失败 1，未处理 1"
-          : "已保存 1，失败 1，未处理 0",
+          ? "保存完成 0，归档完成 0，已结清跳过 0，未确认完成 1，未处理 1"
+          : "保存完成 1，归档完成 0，已结清跳过 0，未确认完成 1，未处理 0",
       );
       if (closeFailure) expect(result.stderr).toContain("浏览器清理失败");
       expect((await readFile(detailLog, "utf8")).trim().split("\n")).toEqual(
@@ -397,7 +433,9 @@ test.each([
       FROM post_work WHERE post_id=${first}`;
       expect(run?.summary).toEqual({
         saved: closeFailure ? 0 : 1,
-        failed: 1,
+        archived: 0,
+        skipped: 0,
+        unconfirmed: 1,
         unprocessed: closeFailure ? 1 : 0,
       });
       expect(work?.status).toBe("failed");
@@ -428,12 +466,20 @@ test("SIGINT after a nonempty retry snapshot records known unprocessed counts", 
     child.kill("SIGINT");
     const result = await collectCli(child);
     expect(result.exitCode).toBe(130);
-    expect(result.stderr).toContain("已保存 0，失败 0，未处理 1");
+    expect(result.stderr).toContain(
+      "保存完成 0，归档完成 0，已结清跳过 0，未确认完成 0，未处理 1",
+    );
     const [run] = await testSql<{ outcome: string; summary: unknown }[]>`
       SELECT outcome,summary FROM runs WHERE command='retry'`;
     expect(run).toEqual({
       outcome: "stopped",
-      summary: { saved: 0, failed: 0, unprocessed: 1 },
+      summary: {
+        saved: 0,
+        archived: 0,
+        skipped: 0,
+        unconfirmed: 0,
+        unprocessed: 1,
+      },
     });
     const [work] = await testSql<{ status: string }[]>`
       SELECT status FROM post_work WHERE post_id=${postId}`;
@@ -475,7 +521,9 @@ test.each([
       expect(result.exitCode, result.stderr).toBe(1);
       const stopped = blocked || closeFailure;
       expect(result.stderr).toContain(
-        stopped ? "已保存 0，失败 1，未处理 1" : "已保存 1，失败 1，未处理 0",
+        stopped
+          ? "保存完成 0，归档完成 0，已结清跳过 0，未确认完成 1，未处理 1"
+          : "保存完成 1，归档完成 0，已结清跳过 0，未确认完成 1，未处理 0",
       );
       expect(result.stderr).toContain(
         blocked ? "HTTP 429" : "当前 Post 详情不可读取",
@@ -493,7 +541,9 @@ test.each([
       SELECT summary FROM runs WHERE command='retry'`;
       expect(run?.summary).toEqual({
         saved: stopped ? 0 : 1,
-        failed: 1,
+        archived: 0,
+        skipped: 0,
+        unconfirmed: 1,
         unprocessed: stopped ? 1 : 0,
       });
       if (response === "media-retry-blocked") {
@@ -542,7 +592,9 @@ test("retry continues after a finalizing Post conflicts with its published file"
       GMS_TEST_MEDIA: "1",
     });
     expect(result.exitCode, result.stderr).toBe(1);
-    expect(result.stderr).toContain("已保存 1，失败 1，未处理 0");
+    expect(result.stderr).toContain(
+      "保存完成 1，归档完成 0，已结清跳过 0，未确认完成 1，未处理 0",
+    );
     expect(await readFile(join(root, relative), "utf8")).toBe(
       "conflicting content",
     );
@@ -614,14 +666,16 @@ test.each([{ closeFailure: false }, { closeFailure: true }])(
       expect(result.exitCode, result.stderr).toBe(1);
       expect(result.stderr).toContain(
         closeFailure
-          ? "已保存 0，失败 1，未处理 1"
-          : "已保存 1，失败 1，未处理 0",
+          ? "保存完成 0，归档完成 0，已结清跳过 0，未确认完成 1，未处理 1"
+          : "保存完成 1，归档完成 0，已结清跳过 0，未确认完成 1，未处理 0",
       );
       const [run] = await testSql<{ summary: unknown }[]>`
         SELECT summary FROM runs WHERE command='retry'`;
       expect(run?.summary).toEqual({
         saved: closeFailure ? 0 : 1,
-        failed: 1,
+        archived: 0,
+        skipped: 0,
+        unconfirmed: 1,
         unprocessed: closeFailure ? 1 : 0,
       });
       const [firstWork] = await testSql<
@@ -671,7 +725,9 @@ test("retry continues after an owned temp conflicts with its publish intent", as
       GMS_TEST_MEDIA: "1",
     });
     expect(result.exitCode, result.stderr).toBe(1);
-    expect(result.stderr).toContain("已保存 1，失败 1，未处理 0");
+    expect(result.stderr).toContain(
+      "保存完成 1，归档完成 0，已结清跳过 0，未确认完成 1，未处理 0",
+    );
     expect(
       await readFile(join(root, first, ".retry-conflict.part"), "utf8"),
     ).toBe("conflicting content");
@@ -713,7 +769,9 @@ test("retry continues after an existing media version conflicts with its intent"
       GMS_TEST_MEDIA: "1",
     });
     expect(result.exitCode, result.stderr).toBe(1);
-    expect(result.stderr).toContain("已保存 1，失败 1，未处理 0");
+    expect(result.stderr).toContain(
+      "保存完成 1，归档完成 0，已结清跳过 0，未确认完成 1，未处理 0",
+    );
     expect(await readFile(join(root, relative))).toEqual(bytes);
     const works = await testSql<
       { status: string }[]
@@ -748,7 +806,13 @@ test("retry stops after a blocked Post and leaves later work untouched", async (
     const [run] = await testSql<
       { summary: unknown }[]
     >`SELECT summary FROM runs WHERE command='retry'`;
-    expect(run?.summary).toEqual({ saved: 0, failed: 1, unprocessed: 1 });
+    expect(run?.summary).toEqual({
+      saved: 0,
+      archived: 0,
+      skipped: 0,
+      unconfirmed: 1,
+      unprocessed: 1,
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -810,7 +874,9 @@ test("SIGINT during nonempty retry leaves later members unprocessed", async () =
       GMS_TEST_MEDIA: "1",
     });
     expect(result.exitCode).toBe(130);
-    expect(result.stderr).toContain("已保存 0，失败 0，未处理 2");
+    expect(result.stderr).toContain(
+      "保存完成 0，归档完成 0，已结清跳过 0，未确认完成 1，未处理 1",
+    );
     const [later] = await testSql<
       { status: string; last_run_id: string | null }[]
     >`
@@ -820,7 +886,13 @@ test("SIGINT during nonempty retry leaves later members unprocessed", async () =
       SELECT outcome,summary FROM runs WHERE command='retry'`;
     expect(run).toEqual({
       outcome: "stopped",
-      summary: { saved: 0, failed: 0, unprocessed: 2 },
+      summary: {
+        saved: 0,
+        archived: 0,
+        skipped: 0,
+        unconfirmed: 1,
+        unprocessed: 1,
+      },
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -841,12 +913,20 @@ test("SIGINT after one saved Post reports completed and unprocessed counts", asy
       GMS_TEST_ABORT_DETAIL_ID: second,
     });
     expect(result.exitCode).toBe(130);
-    expect(result.stderr).toContain("已保存 1，失败 0，未处理 1");
+    expect(result.stderr).toContain(
+      "保存完成 1，归档完成 0，已结清跳过 0，未确认完成 1，未处理 0",
+    );
     const [run] = await testSql<{ outcome: string; summary: unknown }[]>`
       SELECT outcome,summary FROM runs WHERE command='retry'`;
     expect(run).toEqual({
       outcome: "stopped",
-      summary: { saved: 1, failed: 0, unprocessed: 1 },
+      summary: {
+        saved: 1,
+        archived: 0,
+        skipped: 0,
+        unconfirmed: 1,
+        unprocessed: 0,
+      },
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -868,7 +948,9 @@ test("SIGINT during retry reports a browser cleanup error with the known counts"
       GMS_TEST_MEDIA: "1",
     });
     expect(result.exitCode).toBe(130);
-    expect(result.stderr).toContain("已保存 0，失败 0，未处理 2");
+    expect(result.stderr).toContain(
+      "保存完成 0，归档完成 0，已结清跳过 0，未确认完成 1，未处理 1",
+    );
     expect(result.stderr).toContain(
       "浏览器清理失败：simulated browser close failure",
     );
@@ -902,7 +984,9 @@ test("retry leaves its Run open and later work untouched after losing its lock m
     });
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("执行器会话锁已丢失");
-    expect(result.stderr).toContain("已保存 1，失败 0，未处理 1");
+    expect(result.stderr).toContain(
+      "保存完成 1，归档完成 0，已结清跳过 0，未确认完成 0，未处理 1",
+    );
     const [later] = await testSql<
       { status: string; last_run_id: string | null }[]
     >`
@@ -933,7 +1017,9 @@ test("retry stops later work when browser cleanup fails after a saved Post", asy
     });
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("浏览器清理失败");
-    expect(result.stderr).toContain("已保存 1，失败 0，未处理 1");
+    expect(result.stderr).toContain(
+      "保存完成 1，归档完成 0，已结清跳过 0，未确认完成 0，未处理 1",
+    );
     const [firstWork] = await testSql<{ status: string }[]>`
       SELECT status FROM post_work WHERE post_id=${first}`;
     expect(firstWork?.status).toBe("saved");
@@ -945,7 +1031,13 @@ test("retry stops later work when browser cleanup fails after a saved Post", asy
     const [run] = await testSql<
       { summary: unknown }[]
     >`SELECT summary FROM runs WHERE command='retry'`;
-    expect(run?.summary).toEqual({ saved: 1, failed: 0, unprocessed: 1 });
+    expect(run?.summary).toEqual({
+      saved: 1,
+      archived: 0,
+      skipped: 0,
+      unconfirmed: 0,
+      unprocessed: 1,
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -965,7 +1057,9 @@ test("retry CLI keeps completed counts when database cleanup fails", async () =>
     });
     expect(result.exitCode, result.stderr).toBe(1);
     expect(result.stderr).toContain("重试 Run 已记录");
-    expect(result.stderr).toContain("已保存 1，失败 0，未处理 0");
+    expect(result.stderr).toContain(
+      "保存完成 1，归档完成 0，已结清跳过 0，未确认完成 0，未处理 0",
+    );
     expect(result.stderr).toContain(
       "数据库关闭失败：simulated database close failure",
     );
@@ -975,7 +1069,13 @@ test("retry CLI keeps completed counts when database cleanup fails", async () =>
       SELECT outcome,summary FROM runs WHERE command='retry'`;
     expect(run).toEqual({
       outcome: "succeeded",
-      summary: { saved: 1, failed: 0, unprocessed: 0 },
+      summary: {
+        saved: 1,
+        archived: 0,
+        skipped: 0,
+        unconfirmed: 0,
+        unprocessed: 0,
+      },
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -997,9 +1097,9 @@ test("retry CLI reports only confirmed progress after a save commit loses its re
     expect(result.exitCode, result.stderr).toBe(1);
     expect(result.stderr).toContain("重试结果未知；未确认 Run 记账");
     expect(result.stderr).toContain(
-      "已确认处理：已保存 0，失败 0；剩余 1 项结果未确认",
+      "保存完成 0，归档完成 0，已结清跳过 0，未确认完成 1，未处理 0",
     );
-    expect(result.stderr).not.toContain("未处理 1");
+    expect(result.stderr).not.toContain("保存完成 1");
     const [run] = await testSql<
       { outcome: string | null; summary: unknown }[]
     >`SELECT outcome,summary FROM runs WHERE command='retry'`;
@@ -1033,7 +1133,9 @@ test("retry shares nonzero pacing across failed Posts, detail retries and media 
       GMS_TEST_MEDIA: "1",
     });
     expect(result.exitCode, result.stderr).toBe(1);
-    expect(result.stderr).toContain("已保存 2，失败 1，未处理 0");
+    expect(result.stderr).toContain(
+      "保存完成 2，归档完成 0，已结清跳过 0，未确认完成 1，未处理 0",
+    );
     const events: { kind: string; postId: string; at: number }[] = (
       await readFile(eventsPath, "utf8")
     )
@@ -1065,7 +1167,13 @@ test("retry shares nonzero pacing across failed Posts, detail retries and media 
     >`SELECT outcome,summary FROM runs WHERE command='retry'`;
     expect(run).toEqual({
       outcome: "failed",
-      summary: { saved: 2, failed: 1, unprocessed: 0 },
+      summary: {
+        saved: 2,
+        archived: 0,
+        skipped: 0,
+        unconfirmed: 1,
+        unprocessed: 0,
+      },
     });
     const works = await testSql<
       { status: string }[]
@@ -1112,7 +1220,9 @@ test("SIGINT cancels retry pacing before the next Post opens a browser request",
     const result = await resultPromise;
     expect(Date.now() - stoppedAt).toBeLessThan(2000);
     expect(result.exitCode, result.stderr).toBe(130);
-    expect(result.stderr).toContain("已保存 0，失败 1，未处理 1");
+    expect(result.stderr).toContain(
+      "保存完成 0，归档完成 0，已结清跳过 0，未确认完成 2，未处理 0",
+    );
     const events: { kind: string; postId: string }[] = (
       await readFile(eventsPath, "utf8")
     )
@@ -1131,7 +1241,13 @@ test("SIGINT cancels retry pacing before the next Post opens a browser request",
     >`SELECT outcome,summary FROM runs WHERE command='retry'`;
     expect(run).toEqual({
       outcome: "stopped",
-      summary: { saved: 0, failed: 1, unprocessed: 1 },
+      summary: {
+        saved: 0,
+        archived: 0,
+        skipped: 0,
+        unconfirmed: 2,
+        unprocessed: 0,
+      },
     });
   } finally {
     if (child.exitCode === null) child.kill("SIGKILL");
@@ -1257,7 +1373,9 @@ test("nonempty retry rejects missing save configuration before creating a Run", 
   const result = await runCli(databaseEnv, ["retry"]);
   expect(result.exitCode).toBe(2);
   expect(result.stderr).toContain("GROK_ARCHIVE_DIR");
-  expect(result.stderr).toContain("已保存 0，失败 0，未处理 1");
+  expect(result.stderr).toContain(
+    "保存完成 0，归档完成 0，已结清跳过 0，未确认完成 0，未处理 1",
+  );
   const [run] = await testSql<
     { id: string }[]
   >`SELECT id FROM runs WHERE command='retry'`;
@@ -1311,7 +1429,13 @@ test("stopped retry keeps exit classification and reports cleanup failure separa
       SELECT outcome, summary FROM runs
     `;
     expect(run?.outcome).toBe("stopped");
-    expect(run?.summary).toEqual({ saved: 0, failed: 0, unprocessed: 0 });
+    expect(run?.summary).toEqual({
+      saved: 0,
+      archived: 0,
+      skipped: 0,
+      unconfirmed: 0,
+      unprocessed: 0,
+    });
   } finally {
     await dropRetryDelayTrigger();
   }
@@ -1348,7 +1472,9 @@ test("retry application result retains browser cleanup failure and known counts 
       }),
     );
     expect(result.status).toBe("cancelled");
-    expect(result.message).toContain("已保存 0，失败 0，未处理 2");
+    expect(result.message).toContain(
+      "保存完成 0，归档完成 0，已结清跳过 0，未确认完成 1，未处理 1",
+    );
     expect(result.cleanupErrors).toEqual([
       "浏览器清理失败：simulated browser cleanup failure",
     ]);
@@ -1356,7 +1482,13 @@ test("retry application result retains browser cleanup failure and known counts 
       SELECT outcome,summary FROM runs WHERE command='retry'`;
     expect(run).toEqual({
       outcome: "stopped",
-      summary: { saved: 0, failed: 0, unprocessed: 2 },
+      summary: {
+        saved: 0,
+        archived: 0,
+        skipped: 0,
+        unconfirmed: 1,
+        unprocessed: 1,
+      },
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1557,7 +1689,13 @@ test("P2-08 S2 混合retry固定选择未完成目标并串行保存或归档", 
     const [run] = await testSql`SELECT outcome, summary FROM runs`;
     expect(run).toEqual({
       outcome: "succeeded",
-      summary: { saved: 3, failed: 0, unprocessed: 0 },
+      summary: {
+        saved: 1,
+        archived: 2,
+        skipped: 0,
+        unconfirmed: 0,
+        unprocessed: 0,
+      },
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1707,7 +1845,13 @@ test("P2-08 S2 混合未知与已移除补救共用许可且普通失败后继�
     ]);
     expect((await testSql`SELECT outcome,summary FROM runs`)[0]).toEqual({
       outcome: "failed",
-      summary: { saved: 3, failed: 1, unprocessed: 0 },
+      summary: {
+        saved: 0,
+        archived: 3,
+        skipped: 0,
+        unconfirmed: 1,
+        unprocessed: 0,
+      },
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1809,7 +1953,7 @@ test("P2-08 S2 页面关闭失败仍断开连接与关闭DB且保留归档完成
   }
 });
 
-test("P2-08 S1 retry固定快照不纳入执行期新增工作且失败项不循环", async () => {
+test("P2-08 P2-11 S1 retry固定快照不纳入执行期新增工作且失败项不循环", async () => {
   await resetSchema();
   const root = await mkdtemp(join(tmpdir(), "gms-retry-snapshot-"));
   try {
@@ -1837,6 +1981,21 @@ test("P2-08 S1 retry固定快照不纳入执行期新增工作且失败项不循
       }),
     );
     expect(result.status).toBe("failed");
+    expect(result.summary).toEqual({
+      saved: 0,
+      archived: 0,
+      skipped: 0,
+      unconfirmed: 1,
+      unprocessed: 0,
+    });
+    expect(result.summaryRecorded).toBe(true);
+    expect(result.posts).toMatchObject([
+      {
+        postId: retryFirst,
+        goal: "save",
+        result: { status: "failed", saveRecorded: false },
+      },
+    ]);
     expect(requests).toEqual([retryFirst]);
     expect(
       (
@@ -1848,7 +2007,13 @@ test("P2-08 S1 retry固定快照不纳入执行期新增工作且失败项不循
       last_error: "执行期间新增",
     });
     expect((await testSql`SELECT summary FROM runs`)[0]).toEqual({
-      summary: { saved: 0, failed: 1, unprocessed: 0 },
+      summary: {
+        saved: 0,
+        archived: 0,
+        skipped: 0,
+        unconfirmed: 1,
+        unprocessed: 0,
+      },
     });
   } finally {
     await rm(root, { recursive: true, force: true });

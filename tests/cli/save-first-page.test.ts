@@ -67,7 +67,9 @@ test("S2 save first-page completes an empty page once", async () => {
       GMS_TEST_REQUEST_EVENTS: events,
     });
     expect(result.exitCode, result.stderr).toBe(0);
-    expect(result.stdout).toContain("已保存 0，失败 0，未处理 0");
+    expect(result.stdout).toContain(
+      "保存完成 0，归档完成 0，已结清跳过 0，未确认完成 0，未处理 0",
+    );
     expect(
       (await readFile(events, "utf8"))
         .trim()
@@ -80,7 +82,13 @@ test("S2 save first-page completes an empty page once", async () => {
     expect(saved).toEqual({
       command: "save-first-page",
       outcome: "succeeded",
-      summary: { saved: 0, failed: 0, unprocessed: 0 },
+      summary: {
+        saved: 0,
+        archived: 0,
+        skipped: 0,
+        unconfirmed: 0,
+        unprocessed: 0,
+      },
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -134,7 +142,13 @@ test("S2 final browser close failure keeps the completed Run and exits nonzero",
       SELECT outcome, summary FROM runs WHERE command='save-first-page'`;
     expect(saved).toEqual({
       outcome: "succeeded",
-      summary: { saved: 0, failed: 0, unprocessed: 0 },
+      summary: {
+        saved: 0,
+        archived: 0,
+        skipped: 0,
+        unconfirmed: 0,
+        unprocessed: 0,
+      },
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -209,12 +223,20 @@ test("S1 stop after settling an old publication counts its saved fact", async ()
       }),
     );
     expect(result.status).toBe("cancelled");
-    expect(result.message).toContain("已保存 1，失败 0，未处理 1");
+    expect(result.message).toContain(
+      "保存完成 1，归档完成 0，已结清跳过 0，未确认完成 0，未处理 1",
+    );
     const [run] = await testSql<{ outcome: string; summary: unknown }[]>`
       SELECT outcome, summary FROM runs WHERE command='save-first-page'`;
     expect(run).toEqual({
       outcome: "stopped",
-      summary: { saved: 1, failed: 0, unprocessed: 1 },
+      summary: {
+        saved: 1,
+        archived: 0,
+        skipped: 0,
+        unconfirmed: 0,
+        unprocessed: 1,
+      },
     });
     const works = await testSql<{ post_id: string; status: string }[]>`
       SELECT post_id, status FROM post_work ORDER BY post_id`;
@@ -263,12 +285,20 @@ test("S1 stop before rereading an already saved Post leaves this page member unp
       }),
     );
     expect(result.status).toBe("cancelled");
-    expect(result.message).toContain("已保存 0，失败 0，未处理 2");
+    expect(result.message).toContain(
+      "保存完成 0，归档完成 0，已结清跳过 0，未确认完成 1，未处理 1",
+    );
     const [savedRun] = await testSql<{ outcome: string; summary: unknown }[]>`
       SELECT outcome, summary FROM runs WHERE command='save-first-page'`;
     expect(savedRun).toEqual({
       outcome: "stopped",
-      summary: { saved: 0, failed: 0, unprocessed: 2 },
+      summary: {
+        saved: 0,
+        archived: 0,
+        skipped: 0,
+        unconfirmed: 1,
+        unprocessed: 1,
+      },
     });
     const works = await testSql<{ post_id: string; status: string }[]>`
       SELECT post_id, status FROM post_work ORDER BY post_id`;
@@ -295,12 +325,20 @@ test("S2 stop before rereading an already saved Post reports no new save", async
       GMS_TEST_ABORT_DETAIL_ID: first,
     });
     expect(result.exitCode).toBe(130);
-    expect(result.stderr).toContain("已保存 0，失败 0，未处理 2");
+    expect(result.stderr).toContain(
+      "保存完成 0，归档完成 0，已结清跳过 0，未确认完成 1，未处理 1",
+    );
     const [savedRun] = await testSql<{ outcome: string; summary: unknown }[]>`
       SELECT outcome, summary FROM runs WHERE command='save-first-page'`;
     expect(savedRun).toEqual({
       outcome: "stopped",
-      summary: { saved: 0, failed: 0, unprocessed: 2 },
+      summary: {
+        saved: 0,
+        archived: 0,
+        skipped: 0,
+        unconfirmed: 1,
+        unprocessed: 1,
+      },
     });
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -352,7 +390,13 @@ test("S1 Application schedules one page in order and persists only started Posts
     const [savedRun] = await testSql<
       { summary: unknown }[]
     >`SELECT summary FROM runs WHERE command='save-first-page'`;
-    expect(savedRun?.summary).toEqual({ saved: 0, failed: 2, unprocessed: 0 });
+    expect(savedRun?.summary).toEqual({
+      saved: 0,
+      archived: 0,
+      skipped: 0,
+      unconfirmed: 2,
+      unprocessed: 0,
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -377,7 +421,9 @@ test("S2 save first-page handles mixed results serially and leaves later members
       GMS_TEST_REQUEST_EVENTS: events,
     });
     expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("已保存 2，失败 2，未处理 1");
+    expect(result.stderr).toContain(
+      "保存完成 2，归档完成 0，已结清跳过 0，未确认完成 2，未处理 1",
+    );
     const requests = (await readFile(events, "utf8"))
       .trim()
       .split("\n")
@@ -394,7 +440,13 @@ test("S2 save first-page handles mixed results serially and leaves later members
     const [savedRun] = await testSql<
       { summary: unknown }[]
     >`SELECT summary FROM runs WHERE command='save-first-page'`;
-    expect(savedRun?.summary).toEqual({ saved: 2, failed: 2, unprocessed: 1 });
+    expect(savedRun?.summary).toEqual({
+      saved: 2,
+      archived: 0,
+      skipped: 0,
+      unconfirmed: 2,
+      unprocessed: 1,
+    });
     const savedWorks = await testSql<
       { post_id: string; status: string }[]
     >`SELECT post_id, status FROM post_work WHERE status='saved' ORDER BY post_id`;
@@ -424,7 +476,9 @@ test("S2 final page failure records an unknown summary and starts no Post", asyn
     });
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("Saved 第一页不可读取");
-    expect(result.stderr).not.toContain("已保存 0，失败 0，未处理 0");
+    expect(result.stderr).not.toContain(
+      "保存完成 0，归档完成 0，已结清跳过 0，未确认完成 0，未处理 0",
+    );
     const [savedRun] = await testSql<
       { outcome: string; summary: unknown }[]
     >`SELECT outcome, summary FROM runs WHERE command='save-first-page'`;
@@ -483,7 +537,7 @@ test("S2 stop leaves the next page member without work and reports exit 130", as
       GMS_TEST_REQUEST_EVENTS: events,
     });
     expect(result.exitCode, result.stderr).toBe(130);
-    expect(result.stderr).toContain("未处理 2");
+    expect(result.stderr).toContain("未处理 1");
     const requests = (await readFile(events, "utf8"))
       .trim()
       .split("\n")
@@ -500,7 +554,13 @@ test("S2 stop leaves the next page member without work and reports exit 130", as
       { outcome: string; summary: unknown }[]
     >`SELECT outcome, summary FROM runs WHERE command='save-first-page'`;
     expect(savedRun?.outcome).toBe("stopped");
-    expect(savedRun?.summary).toEqual({ saved: 0, failed: 0, unprocessed: 2 });
+    expect(savedRun?.summary).toEqual({
+      saved: 0,
+      archived: 0,
+      skipped: 0,
+      unconfirmed: 1,
+      unprocessed: 1,
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -546,8 +606,8 @@ test("S2 page save rereads saved work and shares request interval across page, d
       { summary: unknown }[]
     >`SELECT summary FROM runs WHERE command='save-first-page' ORDER BY started_at`;
     expect(runs.map((item) => item.summary)).toEqual([
-      { saved: 1, failed: 0, unprocessed: 0 },
-      { saved: 1, failed: 0, unprocessed: 0 },
+      { saved: 1, archived: 0, skipped: 0, unconfirmed: 0, unprocessed: 0 },
+      { saved: 1, archived: 0, skipped: 0, unconfirmed: 0, unprocessed: 0 },
     ]);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -602,7 +662,13 @@ test("P2-01 S2 单页保留 archive、报告未处理并继续新 save", async (
     const [savedRun] = await testSql`SELECT outcome, summary FROM runs`;
     expect(savedRun).toEqual({
       outcome: "failed",
-      summary: { saved: 1, failed: 0, unprocessed: 2 },
+      summary: {
+        saved: 1,
+        archived: 0,
+        skipped: 1,
+        unconfirmed: 0,
+        unprocessed: 2,
+      },
     });
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -254,7 +254,7 @@ test("status reports database facts without changing them or needing other resou
     VALUES
       (${runId}, 'save-first-page', NULL, '2026-09-26T10:00:00Z', NULL, NULL, NULL),
       (${finishedRunId}, 'retry', NULL, '2026-09-26T09:00:00Z', '2026-09-26T09:01:00Z', 'failed',
-        '{"saved": 2, "failed": 1, "unprocessed": 3}'::jsonb)
+        '{"saved": 2, "archived": 0, "skipped": 0, "unconfirmed": 1, "unprocessed": 3}'::jsonb)
   `;
   await testSql`
     INSERT INTO post_work (post_id, status, last_run_id, last_error)
@@ -306,14 +306,14 @@ test("status reports saved run summary and fails safely when the database is una
     INSERT INTO runs (id, command, started_at, finished_at, outcome, summary)
     VALUES ('00000000-0000-4000-8000-000000000012', 'save-post',
       '2026-09-26T12:00:00Z', '2026-09-26T12:05:00Z', 'failed',
-      '{"saved": 2, "failed": 1, "unprocessed": 3}'::jsonb)
+      '{"saved": 2, "archived": 0, "skipped": 0, "unconfirmed": 1, "unprocessed": 3}'::jsonb)
   `;
 
   const result = await runCli(databaseEnv, ["status"]);
   expect(result.exitCode).toBe(0);
   expect(result.stdout).toContain("最近 Run");
-  expect(result.stdout).toContain("已保存 2");
-  expect(result.stdout).toContain("失败 1");
+  expect(result.stdout).toContain("保存完成 2");
+  expect(result.stdout).toContain("未确认完成 1");
   expect(result.stdout).toContain("未处理 3");
 
   const unavailable = await runCli(

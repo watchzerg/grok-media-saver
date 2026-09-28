@@ -5,6 +5,12 @@ import {
   type MediaSource,
 } from "./core/file-capabilities";
 import { type ArchiveRequestBudget, archivePost } from "./core/post-archiver";
+import {
+  classifyPostResult,
+  emptyRunSummary,
+  formatRunSummary,
+  type RunSummary,
+} from "./core/run-summary";
 import { discardDownloadedTemp, downloadToTemp } from "./files/download";
 import { cleanupPublishedTemp, publishIntent } from "./files/publish-intent";
 import { checkArchiveFile } from "./files/verify";
@@ -83,6 +89,8 @@ export type SavePostResult = {
   // true: a saved fact for this Post was observed or committed; null: DB write outcome unknown.
   saveRecorded: boolean | null;
   cleanupErrors: string[];
+  summary?: RunSummary;
+  summaryRecorded?: boolean | null;
   remoteObservation?: "not-requested" | "unknown" | "removed" | "present";
   archiveRecorded?: boolean | null;
   fatalExecution?: boolean;
@@ -300,6 +308,8 @@ export async function savePost(
   let runId: string | undefined;
   let runWriteUnknown = false;
   let finishingRun = false;
+  const summary = emptyRunSummary(1);
+  let summaryRecorded: boolean | null = false;
   const result: SavePostResult = {
     status: "failed",
     message: "Post 保存未完成。",
@@ -329,7 +339,13 @@ export async function savePost(
   };
   try {
     if (signal.aborted)
-      return { ...result, status: "cancelled", message: "保存已停止。" };
+      return {
+        ...result,
+        status: "cancelled",
+        message: "保存已停止。",
+        summary,
+        summaryRecorded,
+      };
     sql = connectDatabase(config);
     await verifySchema(sql);
     session = await sql.reserve();
@@ -343,6 +359,8 @@ export async function savePost(
     runWriteUnknown = false;
     await assertExecutorLock(session);
     if (signal.aborted) throw new Error("保存已停止。");
+    summary.unprocessed = 0;
+    summary.unconfirmed = 1;
     const postResult = await archivePostInRun(
       config,
       postId,
@@ -356,6 +374,8 @@ export async function savePost(
       (message) => result.cleanupErrors.push(message),
     );
     Object.assign(result, postResult);
+    summary.unconfirmed = 0;
+    summary[classifyPostResult(options.goal ?? "save", postResult)] = 1;
     if (runId && !result.fatalExecution) {
       finishingRun = true;
       options.onStage?.("核对收尾执行器锁");
@@ -363,26 +383,35 @@ export async function savePost(
       options.onStage?.("收尾 Run");
       reportStopAfterSave();
       runWriteUnknown = true;
-      await finishSaveRun(session, runId, result.status);
+      summaryRecorded = null;
+      await finishSaveRun(session, runId, result.status, summary);
+      summaryRecorded = true;
       runWriteUnknown = false;
       options.onStage?.("Run 已收尾");
     }
   } catch (error) {
     if (error instanceof KnownSaveFailure) runWriteUnknown = false;
-    if (runWriteUnknown && result.saveRecorded === false)
+    if (runWriteUnknown && !finishingRun && result.saveRecorded === false)
       result.saveRecorded = null;
-    result.status = signal.aborted && !runWriteUnknown ? "cancelled" : "failed";
-    result.message =
-      finishingRun && options.goal === "archive"
-        ? `${result.message} ${runWriteUnknown ? "Run 收尾提交结果未知，已停止" : "Run 收尾失败"}：${safeSaveError(error, config)}`
-        : runWriteUnknown
-          ? `数据库提交结果未知，已停止：${safeSaveError(error, config)}`
-          : `保存失败：${safeSaveError(error, config)}`;
-    if (runId && session && !runWriteUnknown && !result.fatalExecution) {
+    result.status = signal.aborted ? "cancelled" : "failed";
+    result.message = finishingRun
+      ? `${result.message} ${runWriteUnknown ? "Run 收尾提交结果未知，已停止" : "Run 收尾失败"}：${safeSaveError(error, config)}`
+      : runWriteUnknown
+        ? `数据库提交结果未知，已停止：${safeSaveError(error, config)}`
+        : `保存失败：${safeSaveError(error, config)}`;
+    if (
+      runId &&
+      session &&
+      !finishingRun &&
+      !runWriteUnknown &&
+      !result.fatalExecution
+    ) {
       try {
         await assertExecutorLock(session);
         runWriteUnknown = true;
-        await failSaveRun(session, runId, signal.aborted);
+        summaryRecorded = null;
+        await failSaveRun(session, runId, signal.aborted, summary);
+        summaryRecorded = true;
         runWriteUnknown = false;
       } catch {
         result.message = `${result.message} Run 收尾结果未知。`;
@@ -425,6 +454,9 @@ export async function savePost(
           : "Post 已保存，但资源清理失败。";
     }
   }
+  result.summary = summary;
+  result.summaryRecorded = summaryRecorded;
+  result.message = `${result.message} ${formatRunSummary(summary)}。${summaryRecorded === true ? "Run 摘要已持久记录。" : summaryRecorded === null ? "Run 摘要提交结果未知。" : "Run 摘要未记录。"}`;
   return result;
 }
 

@@ -18,6 +18,12 @@ import type {
   SaveConfig,
   VerifyConfig,
 } from "./config";
+import {
+  classifyPostResult,
+  emptyRunSummary,
+  formatRunSummary,
+  type RunSummary,
+} from "./core/run-summary";
 import { PublishConflictError } from "./files/publish-intent";
 import { checkArchiveFile } from "./files/verify";
 import { normalizePostId, RetryableRequestError } from "./grok/adapter";
@@ -73,6 +79,13 @@ export type VerifyResult = {
 
 export type RetryResult = Omit<DatabaseResult, "status"> & {
   status: "ok" | "failed" | "cancelled" | "invalid";
+  summary?: RunSummary | null;
+  summaryRecorded?: boolean | null;
+  posts?: {
+    postId: string;
+    goal: "save" | "archive";
+    result: Awaited<ReturnType<typeof archivePostInRun>>;
+  }[];
 };
 
 export type DatabaseCloser = (
@@ -178,13 +191,15 @@ async function runBatch(
   let runCreated = false;
   let runTerminalWriteAcknowledged = false;
   let runWriteUnknown = false;
+  let summaryRecorded: boolean | null = false;
   let invalidConfig = false;
   let fatalExecution = false;
   let saveConfig: SaveConfig | undefined;
   let runBrowserSession: BrowserSession | undefined;
-  const counts = { saved: 0, failed: 0, unprocessed: 0 };
+  const counts = emptyRunSummary();
   let countsKnown = false;
   const postErrors: string[] = [];
+  const posts: NonNullable<RetryResult["posts"]> = [];
   let result: RetryResult = {
     status: "failed",
     message: `${label}执行失败。`,
@@ -334,7 +349,10 @@ async function runBatch(
               countsKnown ? counts : null,
               (unknown, finished) => {
                 runWriteUnknown = unknown;
-                if (finished) runTerminalWriteAcknowledged = true;
+                if (finished) {
+                  runTerminalWriteAcknowledged = true;
+                  summaryRecorded = true;
+                } else if (unknown) summaryRecorded = null;
               },
             );
             result = stopped
@@ -356,7 +374,10 @@ async function runBatch(
                 countsKnown ? counts : null,
                 (unknown, finished) => {
                   runWriteUnknown = unknown;
-                  if (finished) runTerminalWriteAcknowledged = true;
+                  if (finished) {
+                    runTerminalWriteAcknowledged = true;
+                    summaryRecorded = true;
+                  } else if (unknown) summaryRecorded = null;
                 },
               );
               result = stopped
@@ -401,6 +422,8 @@ async function runBatch(
                 for (const target of targets) {
                   if (signal?.aborted) break;
                   await assertExecutorLock(session);
+                  counts.unprocessed -= 1;
+                  counts.unconfirmed += 1;
                   let browserResult: Awaited<
                     ReturnType<typeof archivePostInRun>
                   >;
@@ -440,8 +463,6 @@ async function runBatch(
                       error instanceof PublishConflictError ||
                       error instanceof KnownSaveConflict
                     ) {
-                      counts.unprocessed -= 1;
-                      counts.failed += 1;
                       postErrors.push(
                         `Post ${target.postId} 失败：${safeSaveError(error, saveConfig)}`,
                       );
@@ -454,36 +475,19 @@ async function runBatch(
                     ].join(" ");
                     break;
                   }
+                  posts.push({ ...target, result: browserResult });
+                  counts.unconfirmed -= 1;
+                  counts[classifyPostResult(target.goal, browserResult)] += 1;
+                  postErrors.push(
+                    `Post ${target.postId}：${browserResult.message}`,
+                  );
                   if (browserResult.fatalExecution) {
                     fatalExecution = true;
                     result.cleanupErrors.push(...browserResult.cleanupErrors);
                     throw new Error(browserResult.message);
                   }
-                  if (browserResult.unprocessed) {
-                    postErrors.push(
-                      `Post ${target.postId}：${browserResult.message}`,
-                    );
+                  if (browserResult.unprocessed || browserResult.alreadySettled)
                     continue;
-                  }
-                  counts.unprocessed -= 1;
-                  if (browserResult.alreadySettled) {
-                    postErrors.push(
-                      `Post ${target.postId}：${browserResult.message}`,
-                    );
-                    continue;
-                  }
-                  if (
-                    browserResult.status === "ok" ||
-                    (browserResult.status === "cancelled" &&
-                      browserResult.settledIntent)
-                  )
-                    counts.saved += 1;
-                  else {
-                    counts.failed += 1;
-                    postErrors.push(
-                      `Post ${target.postId}：${safeSaveError(browserResult.message, saveConfig)}`,
-                    );
-                  }
                   if (browserResult.cleanupErrors.length) {
                     result.cleanupErrors.push(...browserResult.cleanupErrors);
                     stopReason = browserResult.cleanupErrors.join(" ");
@@ -503,15 +507,17 @@ async function runBatch(
               }
               await assertExecutorLock(session);
               runWriteUnknown = true;
+              summaryRecorded = null;
               const updated = await session<{ id: string }[]>`
                 UPDATE runs SET finished_at = now(),
-                  outcome = ${signal?.aborted ? "stopped" : counts.failed || counts.unprocessed || stopReason ? "failed" : "succeeded"},
+                  outcome = ${signal?.aborted ? "stopped" : counts.unconfirmed || counts.unprocessed || stopReason ? "failed" : "succeeded"},
                   summary = ${countsKnown ? counts : null}::jsonb
                 WHERE id = ${runId}::uuid
                 RETURNING id::text AS id
               `;
               runWriteUnknown = false;
               runTerminalWriteAcknowledged = true;
+              summaryRecorded = true;
               if (updated.length !== 1) throw new Error("Run 结果未记录。");
               await assertExecutorLock(session);
               result = signal?.aborted
@@ -522,7 +528,7 @@ async function runBatch(
                   }
                 : {
                     status:
-                      counts.failed || counts.unprocessed || stopReason
+                      counts.unconfirmed || counts.unprocessed || stopReason
                         ? "failed"
                         : "ok",
                     message:
@@ -561,7 +567,10 @@ async function runBatch(
             countsKnown ? counts : null,
             (unknown, finished) => {
               runWriteUnknown = unknown;
-              if (finished) runTerminalWriteAcknowledged = true;
+              if (finished) {
+                runTerminalWriteAcknowledged = true;
+                summaryRecorded = true;
+              } else if (unknown) summaryRecorded = null;
             },
           );
           result.message = stopped
@@ -590,18 +599,26 @@ async function runBatch(
       try {
         await assertExecutorLock(session);
         runWriteUnknown = true;
+        summaryRecorded = null;
         await session`
           UPDATE runs
-          SET finished_at = now(), outcome = 'failed'
+          SET finished_at = now(), outcome = 'failed', summary = ${countsKnown ? counts : null}::jsonb
           WHERE id = ${runId}::uuid AND finished_at IS NULL
         `;
         runWriteUnknown = false;
         runTerminalWriteAcknowledged = true;
+        summaryRecorded = true;
       } catch {
         // A failed or unknown commit must not be followed by another Run write.
       }
     }
   }
+
+  if (
+    postErrors.length &&
+    !postErrors.every((message) => result.message.includes(message))
+  )
+    result.message = `${result.message} ${postErrors.join(" ")}`;
 
   if (runBrowserSession) {
     try {
@@ -610,7 +627,7 @@ async function runBatch(
       const detail = `浏览器清理失败：${saveConfig ? safeSaveError(error, saveConfig) : safeDatabaseError(error, config)}`;
       result.cleanupErrors.push(detail);
       if (result.status === "ok")
-        result.message = `${label} Run 已记录，但${detail}`;
+        result.message = `${result.message} ${label} Run 已记录，但${detail}`;
       if (result.status !== "cancelled") result.status = "failed";
     }
     if (runBrowserSession.cleanupNotices.length)
@@ -625,7 +642,7 @@ async function runBatch(
           `执行器锁清理失败：${safeDatabaseError(error, config)}`,
         );
         if (result.status === "ok")
-          result.message = `${label} Run 已记录，但执行器锁清理失败。`;
+          result.message = `${result.message} ${label} Run 已记录，但执行器锁清理失败。`;
         if (result.status !== "cancelled") result.status = "failed";
       }
     }
@@ -636,7 +653,7 @@ async function runBatch(
         `执行器连接释放失败：${safeDatabaseError(error, config)}`,
       );
       if (result.status === "ok")
-        result.message = `${label} Run 已记录，但执行器连接释放失败。`;
+        result.message = `${result.message} ${label} Run 已记录，但执行器连接释放失败。`;
       if (result.status !== "cancelled") result.status = "failed";
     }
   }
@@ -648,19 +665,22 @@ async function runBatch(
         `数据库关闭失败：${safeDatabaseError(error, config)}`,
       );
       if (result.status === "ok")
-        result.message = `${label} Run 已记录，但数据库连接关闭失败。`;
+        result.message = `${result.message} ${label} Run 已记录，但数据库连接关闭失败。`;
       if (result.status !== "cancelled") result.status = "failed";
     }
   }
   if (signal?.aborted) {
     result.status = "cancelled";
     if (!result.message.includes("停止"))
-      result.message = "收到停止信号；Run 已完成必要收尾。";
+      result.message = `${result.message} 收到停止信号；Run 已完成必要收尾。`;
   }
-  if (countsKnown)
-    result.message = runWriteUnknown
-      ? `${result.message} 已确认处理：已保存 ${counts.saved}，失败 ${counts.failed}；剩余 ${counts.unprocessed} 项结果未确认。`
-      : `${result.message} 已保存 ${counts.saved}，失败 ${counts.failed}，未处理 ${counts.unprocessed}。`;
+  result.posts = posts;
+  result.summary = countsKnown ? counts : null;
+  result.summaryRecorded = summaryRecorded;
+  result.message = countsKnown
+    ? `${result.message} ${formatRunSummary(counts)}。`
+    : `${result.message} Run 摘要数量未知。`;
+  result.message = `${result.message} ${result.summaryRecorded === true ? "Run 摘要已持久记录。" : result.summaryRecorded === null ? "Run 摘要提交结果未知。" : "Run 摘要未记录。"}`;
   return result;
 }
 
@@ -669,7 +689,7 @@ async function finishStoppedRun(
     ReturnType<NonNullable<ReturnType<typeof connectDatabase>>["reserve"]>
   >,
   runId: string,
-  counts: { saved: number; failed: number; unprocessed: number } | null,
+  counts: RunSummary | null,
   writeState: (unknown: boolean, acknowledged?: boolean) => void,
 ): Promise<boolean> {
   await assertExecutorLock(session);
