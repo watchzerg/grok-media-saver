@@ -12,6 +12,13 @@ mock.module("../../src/store/archive-work.ts", () => ({
     if (process.env.GMS_TEST_LOSE_ARCHIVE_RECEIPT === "intent")
       throw new Error("模拟删除意图提交回执丢失");
   },
+  settlePresentIntent: async (
+    ...args: Parameters<typeof actual.settlePresentIntent>
+  ) => {
+    await actual.settlePresentIntent(...args);
+    if (process.env.GMS_TEST_LOSE_ARCHIVE_RECEIPT === "present")
+      throw new Error("模拟旧删除意图结清提交回执丢失");
+  },
   confirmRemoval: async (...args: Parameters<typeof actual.confirmRemoval>) => {
     await actual.confirmRemoval(...args);
     if (process.env.GMS_TEST_LOSE_ARCHIVE_RECEIPT === "confirm")

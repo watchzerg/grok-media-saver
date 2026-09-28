@@ -53,6 +53,7 @@ type Store = {
   assertLock(): Promise<void>;
   promoteArchiveWork?(): Promise<void>;
   recordDeletionIntent?(versionId: string): Promise<void>;
+  settlePresentIntent?(versionId: string): Promise<void>;
   confirmRemoval?(versionId: string): Promise<void>;
   settleRecoveredArchive?(versionId: string): Promise<void>;
   settleArchive?(versionId: string): Promise<void>;
@@ -132,12 +133,13 @@ export async function archivePost({
     result.archiveRecorded = false;
     if (work?.removalState && work.removalState !== "none") {
       try {
-        await recoverDeletion(work);
+        const continueSaving = await recoverDeletion(work);
+        if (!continueSaving) return result;
       } catch (error) {
         result.fatalExecution = true;
         result.message = `${result.message} 归档恢复未完成；已停止：${error instanceof Error ? error.message : String(error)}`;
       }
-      return result;
+      if (result.fatalExecution) return result;
     }
     await store.promoteArchiveWork?.();
     work = await store.readWork(postId);
@@ -253,7 +255,9 @@ export async function archivePost({
   if (goal === "archive" && result.status === "ok") await removeSavedPost();
   return result;
 
-  async function recoverDeletion(boundWork: Work): Promise<void> {
+  async function recoverDeletion(
+    boundWork: Work,
+  ): Promise<boolean | undefined> {
     const versionId = boundWork.deletionMediaVersionId;
     result.remoteObservation =
       boundWork.removalState === "removed" ? "removed" : "unknown";
@@ -338,13 +342,31 @@ export async function archivePost({
         clearTimeout(timer);
         signal.removeEventListener("abort", abort);
       }
+      if (observed.kind === "present") {
+        result.message =
+          "核对确认远端 Post 仍存在，归档未完成；接续旧意图结清。";
+        try {
+          await store.assertLock();
+          onStage?.("提交旧删除意图结清");
+          if (signal.aborted) {
+            result.status = "cancelled";
+            return;
+          }
+          if (!store.settlePresentIntent)
+            throw new Error("旧删除意图结清能力不可用。");
+          await store.settlePresentIntent(versionId);
+        } catch (error) {
+          result.archiveRecorded = null;
+          result.fatalExecution = true;
+          result.message = `核对确认远端 Post 仍存在，旧删除意图结清提交结果未知，归档未完成；已停止：${error instanceof Error ? error.message : String(error)}`;
+          return;
+        }
+        onStage?.("旧删除意图结清已提交");
+        return true;
+      }
       if (observed.kind !== "removed") {
         result.status = observed.kind === "blocked" ? "blocked" : "failed";
-        if (observed.kind === "present") {
-          result.remoteObservation = "present";
-          result.message =
-            "核对确认远端 Post 仍存在，归档未完成；保留原意图，本次不重发 DELETE。";
-        } else if (observed.kind === "blocked") {
+        if (observed.kind === "blocked") {
           result.message = `核对 GET 被阻挡（HTTP ${observed.status}）${observed.retryAfter ? `；服务端建议等待 ${observed.retryAfter}` : ""}；移除结果未知，待核对。`;
         }
         return;

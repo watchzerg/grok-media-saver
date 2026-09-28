@@ -89,3 +89,21 @@ export async function settleRecoveredArchive(
       throw new KnownSaveFailure("恢复归档结清前的移除事实或绑定发生变化。");
   });
 }
+
+export async function settlePresentIntent(
+  session: ReservedSQL,
+  postId: string,
+  versionId: string,
+  runId: string,
+): Promise<void> {
+  await session.begin(async (tx) => {
+    const changed = await tx`UPDATE post_work SET removal_state = 'none',
+      deletion_media_version_id = NULL, last_run_id = ${runId}::uuid, last_error = NULL
+      WHERE post_id = ${postId} AND goal = 'archive' AND removal_state = 'pending'
+        AND NOT archive_settled AND deletion_media_version_id = ${versionId}::uuid
+        AND EXISTS (SELECT 1 FROM media_versions WHERE post_id = ${postId} AND id = ${versionId}::uuid)
+      RETURNING post_id`;
+    if (changed.length !== 1)
+      throw new KnownSaveFailure("旧删除意图结清前的意图或绑定发生变化。");
+  });
+}

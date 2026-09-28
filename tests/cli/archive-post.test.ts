@@ -1501,28 +1501,50 @@ test.each([
   expect(fake.requests).toEqual([`check:${postId}`]);
 });
 
-test("P2-04 S1 isDeleted false 无媒体结构也确认存在，保留意图明确未完成", async () => {
+test("P2-05 S1 无媒体存在判据先结清旧意图，再核验复用并仅删除一次", async () => {
   await seedPendingArchive();
   const before = await work();
   const fake = checkOptions({
     status: 200,
     body: { assetId: postId, isDeleted: false },
   });
+  let atDetail: unknown;
   const result = await archiveSelectedPost(
     config(),
     postId,
     new AbortController().signal,
     undefined,
-    fake.connect,
+    async () => {
+      const browser = await fake.connect();
+      return {
+        ...browser,
+        getPostDetail: async (id: string) => {
+          atDetail = await work();
+          return browser.getPostDetail(id);
+        },
+      };
+    },
   );
   expect(result).toMatchObject({
-    status: "failed",
-    remoteObservation: "present",
-    archiveRecorded: false,
+    status: "ok",
+    remoteObservation: "removed",
+    archiveRecorded: true,
   });
-  expect(result.message).toContain("仍存在");
-  expect(await work()).toEqual(before);
-  expect(fake.requests).toEqual([`check:${postId}`]);
+  expect(atDetail).toMatchObject({
+    removal_state: "none",
+    deletion_media_version_id: null,
+    saved_media_version_id: before?.saved_media_version_id,
+    status: "saved",
+  });
+  expect(fake.requests).toEqual([
+    `check:${postId}`,
+    `detail:${postId}`,
+    `delete:${postId}`,
+  ]);
+  expect(await work()).toMatchObject({
+    archive_settled: true,
+    deletion_media_version_id: before?.saved_media_version_id,
+  });
 });
 
 test.each(["missing", "conflict"])(
@@ -1789,3 +1811,222 @@ test("P2-04 S2 实际GET在途SIGINT取消请求，原意图保持未知", async
     }
   }
 }, 10000);
+
+const presentCheckEnv = {
+  GMS_TEST_CHECK_STATUS: "200",
+  GMS_TEST_CHECK_BODY: JSON.stringify({ assetId: postId, isDeleted: false }),
+};
+
+test("P2-05 S2 旧意图结清已提交丢回执，停止且下次按真实DB继续", async () => {
+  const root = await seedPendingArchive();
+  const before = await work();
+  const events = join(root, "present-requests");
+  const result = await cli(
+    {
+      ...presentCheckEnv,
+      GMS_TEST_REQUEST_EVENTS: events,
+      GMS_TEST_LOSE_ARCHIVE_RECEIPT: "present",
+    },
+    postId,
+    ["./tests/helpers/lose-archive-receipt.ts"],
+  );
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr).toContain("仍存在");
+  expect(result.stderr).toContain("提交结果未知");
+  expect(result.stderr).not.toContain("远端已确认移除");
+  expect(await work()).toMatchObject({
+    removal_state: "none",
+    deletion_media_version_id: null,
+    saved_media_version_id: before?.saved_media_version_id,
+    last_error: null,
+  });
+  const [run] =
+    await testSql`SELECT finished_at, outcome FROM runs ORDER BY started_at DESC LIMIT 1`;
+  expect(run).toEqual({ finished_at: null, outcome: null });
+  expect(
+    (await readFile(events, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line).kind),
+  ).toEqual(["check"]);
+  expect((await cli({ GMS_TEST_REQUEST_EVENTS: events })).exitCode).toBe(0);
+  expect(
+    (await readFile(events, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line).kind),
+  ).toEqual(["check", "detail", "delete"]);
+});
+
+test("P2-05 S2 旧意图结清未提交，保留绑定且无详情或DELETE追写", async () => {
+  const root = await seedPendingArchive();
+  const before = await work();
+  const events = join(root, "present-requests");
+  await testSql.unsafe(
+    "CREATE FUNCTION reject_present_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.removal_state = 'pending' AND NEW.removal_state = 'none' THEN RAISE EXCEPTION '模拟旧意图事务未提交'; END IF; RETURN NEW; END $$",
+  );
+  await testSql`CREATE TRIGGER reject_present_write BEFORE UPDATE ON post_work FOR EACH ROW EXECUTE FUNCTION reject_present_write()`;
+  try {
+    const result = await cli({
+      ...presentCheckEnv,
+      GMS_TEST_REQUEST_EVENTS: events,
+    });
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("仍存在");
+    expect(result.stderr).toContain("提交结果未知");
+    expect(await work()).toEqual(before);
+    expect(
+      (await readFile(events, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line).kind),
+    ).toEqual(["check"]);
+    const [run] =
+      await testSql`SELECT finished_at, outcome FROM runs ORDER BY started_at DESC LIMIT 1`;
+    expect(run).toEqual({ finished_at: null, outcome: null });
+  } finally {
+    await testSql`DROP TRIGGER reject_present_write ON post_work`;
+    await testSql`DROP FUNCTION reject_present_write()`;
+  }
+  expect((await cli(presentCheckEnv)).exitCode).toBe(0);
+});
+
+test.each(["changed", "missing", "conflict", "detail-failed", "finalizing"])(
+  "P2-05 S1 旧意图结清后%s沿用保存规则并重新取得资格",
+  async (kind) => {
+    const root = await seedPendingArchive();
+    const before = await work();
+    const [version] =
+      await testSql`SELECT relative_path, sha256, byte_count FROM media_versions WHERE post_id=${postId}`;
+    const path = join(root, String(version?.relative_path));
+    if (kind === "missing") await rm(path);
+    if (kind === "conflict")
+      await writeFile(path, Buffer.alloc(media.length, 1));
+    if (kind === "finalizing")
+      await testSql`UPDATE post_work SET status='finalizing',
+      publish_temp_name='.missing.part', publish_relative_path=${version?.relative_path},
+      publish_expected_bytes=${version?.byte_count}::bigint, publish_sha256=${version?.sha256} WHERE post_id=${postId}`;
+    const fake = checkOptions({
+      status: 200,
+      body: { assetId: postId, isDeleted: false },
+    });
+    const result = await archiveSelectedPost(
+      config(),
+      postId,
+      new AbortController().signal,
+      undefined,
+      async () => {
+        const browser = await fake.connect();
+        return {
+          ...browser,
+          getPostDetail: async (id: string) => {
+            if (kind === "changed") {
+              fake.requests.push(`detail:${id}`);
+              return parsePostDetailResponse(id, {
+                status: 200,
+                contentType: "application/json",
+                finalPath: `/rest/assets/${id}`,
+                body: {
+                  assetId: id,
+                  key: "https://assets.grok.com/new.png",
+                  mimeType: "image/png",
+                },
+              });
+            }
+            if (kind === "detail-failed") {
+              fake.requests.push(`detail:${id}`);
+              return parsePostDetailResponse(id, {
+                status: 404,
+                contentType: "application/json",
+                finalPath: `/rest/assets/${id}`,
+                body: {},
+              });
+            }
+            return browser.getPostDetail(id);
+          },
+        };
+      },
+    );
+    expect(result.status).toBe(
+      ["conflict", "detail-failed"].includes(kind) ? "failed" : "ok",
+    );
+    expect(fake.requests[0]).toBe(`check:${postId}`);
+    expect(fake.requests.filter((r) => r.startsWith("delete:"))).toHaveLength(
+      ["conflict", "detail-failed"].includes(kind) ? 0 : 1,
+    );
+    if (["conflict", "detail-failed"].includes(kind))
+      expect(await work()).toMatchObject({
+        removal_state: "none",
+        deletion_media_version_id: null,
+        archive_settled: false,
+      });
+    else
+      expect((await work())?.deletion_media_version_id).toBe(
+        before?.saved_media_version_id,
+      );
+    if (["changed", "missing"].includes(kind))
+      expect(fake.requests).toContain("media");
+    if (kind === "conflict")
+      expect(await readFile(path)).toEqual(Buffer.alloc(media.length, 1));
+  },
+);
+
+test("P2-05 S1 来源变化产生新内容，只绑定重新保存版本并保留旧文件", async () => {
+  const root = await seedPendingArchive();
+  const before = await work();
+  const [old] =
+    await testSql`SELECT relative_path FROM media_versions WHERE post_id=${postId}`;
+  const fake = checkOptions({
+    status: 200,
+    body: { assetId: postId, isDeleted: false },
+  });
+  const content = Buffer.concat([media, Buffer.from("new-version")]);
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    new AbortController().signal,
+    undefined,
+    async () => ({
+      ...(await fake.connect()),
+      getPostDetail: async (id: string) => {
+        fake.requests.push(`detail:${id}`);
+        return parsePostDetailResponse(id, {
+          status: 200,
+          contentType: "application/json",
+          finalPath: `/rest/assets/${id}`,
+          body: {
+            assetId: id,
+            key: "https://assets.grok.com/new.png",
+            mimeType: "image/png",
+          },
+        });
+      },
+      downloadMedia: async (_selection, onResponse, onChunk) => {
+        fake.requests.push("media");
+        await onResponse({
+          status: 200,
+          contentType: "image/png",
+          contentLength: String(content.length),
+          contentEncoding: null,
+        });
+        await onChunk(content);
+      },
+    }),
+  );
+  expect(result.status).toBe("ok");
+  const after = await work();
+  expect(after?.deletion_media_version_id).toBe(after?.saved_media_version_id);
+  expect(after?.saved_media_version_id).not.toBe(
+    before?.saved_media_version_id,
+  );
+  expect(
+    await testSql`SELECT id FROM media_versions WHERE post_id=${postId}`,
+  ).toHaveLength(2);
+  expect(await readFile(join(root, String(old?.relative_path)))).toEqual(media);
+  expect(fake.requests).toEqual([
+    `check:${postId}`,
+    `detail:${postId}`,
+    "media",
+    `delete:${postId}`,
+  ]);
+});

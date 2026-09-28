@@ -20,6 +20,7 @@ import {
   promoteArchiveWork,
   recordDeletionIntent,
   settleArchive,
+  settlePresentIntent,
   settleRecoveredArchive,
 } from "./store/archive-work";
 import { connectDatabase, safeDatabaseError } from "./store/database";
@@ -207,6 +208,8 @@ export async function archivePostInRun(
           write(() => promoteArchiveWork(session, postId, runId)),
         recordDeletionIntent: (versionId) =>
           write(() => recordDeletionIntent(session, postId, versionId, runId)),
+        settlePresentIntent: (versionId) =>
+          write(() => settlePresentIntent(session, postId, versionId, runId)),
         confirmRemoval: (versionId) =>
           write(() => confirmRemoval(session, postId, versionId, runId)),
         settleRecoveredArchive: (versionId) =>
