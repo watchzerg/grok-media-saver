@@ -50,6 +50,11 @@ type PageLike = {
 
 type PageRouteLike = {
   request(): { url(): string; method(): string };
+  fulfill(options: {
+    status: number;
+    contentType: string;
+    body: string;
+  }): Promise<void>;
   abort(): Promise<void>;
   continue(): Promise<void>;
 };

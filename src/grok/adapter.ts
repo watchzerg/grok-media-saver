@@ -260,3 +260,50 @@ export function parseDeleteResponse(
     return { kind: "unknown" };
   return { kind: "removed" };
 }
+
+export type RawCheckResponse = RawDeleteResponse & {
+  authenticationUnreliable?: boolean;
+};
+export type CheckResponse = DeleteResponse | { kind: "present" };
+
+export function parseCheckResponse(
+  postId: string,
+  response: RawCheckResponse,
+): CheckResponse {
+  if (
+    response.status === 401 ||
+    response.status === 429 ||
+    /\/(?:login|signin|challenge|tos-gate)(?:\/|$)/i.test(response.finalUrl)
+  )
+    return {
+      kind: "blocked",
+      status: response.status,
+      retryAfter: response.retryAfter,
+    };
+  if (
+    response.authenticationUnreliable ||
+    response.method !== "GET" ||
+    response.redirected ||
+    response.finalUrl !== postAssetUrl(postId) ||
+    response.contentType.split(";")[0]?.trim().toLowerCase() !==
+      "application/json" ||
+    !response.body ||
+    typeof response.body !== "object" ||
+    Array.isArray(response.body)
+  )
+    return { kind: "unknown" };
+  const body = response.body as Record<string, unknown>;
+  if (
+    response.status === 404 &&
+    body.code === 5 &&
+    body.message === "Asset not found"
+  )
+    return { kind: "removed" };
+  if (
+    response.status === 200 &&
+    body.assetId === postId &&
+    body.isDeleted === false
+  )
+    return { kind: "present" };
+  return { kind: "unknown" };
+}

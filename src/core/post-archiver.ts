@@ -1,5 +1,10 @@
 import type { PostMediaSelection, PostResponse } from "../grok/adapter";
-import { type DeleteResponse, RetryableRequestError } from "../grok/adapter";
+import {
+  type CheckResponse,
+  type DeleteResponse,
+  RetryableRequestError,
+  UnconfirmedStopError,
+} from "../grok/adapter";
 import { KnownSaveFailure, type Work } from "../store/save-work";
 import {
   BlockedMediaError,
@@ -48,6 +53,8 @@ type Store = {
   assertLock(): Promise<void>;
   promoteArchiveWork?(): Promise<void>;
   recordDeletionIntent?(versionId: string): Promise<void>;
+  confirmRemoval?(versionId: string): Promise<void>;
+  settleRecoveredArchive?(versionId: string): Promise<void>;
   settleArchive?(versionId: string): Promise<void>;
 };
 
@@ -65,9 +72,11 @@ export async function archivePost({
   runId,
   goal = "save",
   deletePost,
+  checkPost,
 }: {
   postId: string;
   goal?: "save" | "archive";
+  checkPost?: (postId: string, signal: AbortSignal) => Promise<CheckResponse>;
   deletePost?: (postId: string, signal: AbortSignal) => Promise<DeleteResponse>;
   files: FileCapabilities;
   signal: AbortSignal;
@@ -87,7 +96,7 @@ export async function archivePost({
     cleanupErrors: string[];
     unprocessed?: boolean;
     alreadySettled?: boolean;
-    remoteObservation?: "not-requested" | "unknown" | "removed";
+    remoteObservation?: "not-requested" | "unknown" | "removed" | "present";
     archiveRecorded?: boolean | null;
     fatalExecution?: boolean;
   } = {
@@ -118,12 +127,7 @@ export async function archivePost({
     result.remoteObservation = "not-requested";
     result.archiveRecorded = false;
     if (work?.removalState && work.removalState !== "none") {
-      result.remoteObservation =
-        work.removalState === "removed" ? "removed" : "unknown";
-      result.message =
-        work.removalState === "removed"
-          ? "远端已确认移除，归档尚未结清；请接续绑定版本核验。"
-          : "移除结果未知，删除意图待核对；本次不重发 DELETE。";
+      await recoverDeletion(work);
       return result;
     }
     await store.promoteArchiveWork?.();
@@ -239,6 +243,142 @@ export async function archivePost({
   }
   if (goal === "archive" && result.status === "ok") await removeSavedPost();
   return result;
+
+  async function recoverDeletion(boundWork: Work): Promise<void> {
+    const versionId = boundWork.deletionMediaVersionId;
+    result.remoteObservation =
+      boundWork.removalState === "removed" ? "removed" : "unknown";
+    result.message = "移除结果未知，删除意图待核对；本次不重发 DELETE。";
+    if (!versionId || !store.confirmRemoval || !store.settleRecoveredArchive)
+      throw new Error("删除绑定记录无法确认，归档未完成。");
+    if (boundWork.removalState === "pending") {
+      if (!checkPost) throw new Error("浏览器会话不支持精确 Post 核对 GET。");
+      await waitBeforeRetry(signal);
+      await store.assertLock();
+      if (signal.aborted) {
+        result.status = "cancelled";
+        return;
+      }
+      const current = await store.readWork(postId);
+      if (
+        current?.removalState !== "pending" ||
+        current.deletionMediaVersionId !== versionId
+      )
+        throw new Error("核对前删除意图或绑定发生变化。");
+      onStage?.("核对精确 Post");
+      if (signal.aborted) {
+        result.status = "cancelled";
+        return;
+      }
+      const controller = new AbortController();
+      let rejectDeadline!: (error: Error) => void;
+      const deadline = new Promise<never>((_, reject) => {
+        rejectDeadline = reject;
+      });
+      const timer = setTimeout(() => {
+        controller.abort();
+        rejectDeadline(
+          new UnconfirmedStopError(
+            "核对 GET 超过 30 秒总期限；请求停止无法确认。",
+          ),
+        );
+      }, 30_000);
+      const abort = () => controller.abort();
+      signal.addEventListener("abort", abort, { once: true });
+      let observed: CheckResponse;
+      try {
+        observed = await Promise.race([
+          checkPost(postId, controller.signal),
+          deadline,
+        ]);
+        if (signal.aborted) {
+          result.status = "cancelled";
+          return;
+        }
+        await store.assertLock();
+      } catch (error) {
+        result.status = signal.aborted ? "cancelled" : "failed";
+        result.message += ` ${error instanceof Error ? error.message : String(error)}`;
+        // 断连、取消收尾不确定或丢锁后停止推进；不改写 Post 工作事实。
+        result.fatalExecution = true;
+        if (error instanceof UnconfirmedStopError)
+          result.cleanupErrors.push(error.message);
+        return;
+      } finally {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", abort);
+      }
+      if (observed.kind !== "removed") {
+        result.status = observed.kind === "blocked" ? "blocked" : "failed";
+        if (observed.kind === "present") {
+          result.remoteObservation = "present";
+          result.message =
+            "核对确认远端 Post 仍存在，归档未完成；保留原意图，本次不重发 DELETE。";
+        } else if (observed.kind === "blocked") {
+          result.message = `核对 GET 被阻挡（HTTP ${observed.status}）${observed.retryAfter ? `；服务端建议等待 ${observed.retryAfter}` : ""}；移除结果未知，待核对。`;
+        }
+        return;
+      }
+      result.remoteObservation = "removed";
+      onStage?.("远端已确认移除");
+      try {
+        await store.assertLock();
+        if (signal.aborted) {
+          result.status = "cancelled";
+          return;
+        }
+        await store.confirmRemoval(versionId);
+      } catch (error) {
+        uncertainWrite(error, "移除确认");
+        return;
+      }
+      onStage?.("移除确认已提交");
+    }
+    result.message = "远端已确认移除，归档尚未结清；接续绑定版本核验。";
+    if (signal.aborted) {
+      result.status = "cancelled";
+      return;
+    }
+    await store.assertLock();
+    const version = await store.readSavedVersion(postId, versionId);
+    if (!version) throw new Error("删除绑定版本不存在，归档未结清。");
+    onStage?.("核验删除绑定文件");
+    const check = await files.checkArchiveFile(
+      version.relativePath,
+      Number(version.byteCount),
+      version.sha256,
+    );
+    if (signal.aborted) {
+      result.status = "cancelled";
+      return;
+    }
+    if (check.status !== "ok") {
+      result.message = `远端已确认移除，绑定文件${check.status === "missing" ? "缺失" : check.status === "failed" ? `访问失败：${check.reason}` : "内容冲突或不符"}；归档未结清。`;
+      return;
+    }
+    try {
+      await store.assertLock();
+      if (signal.aborted) {
+        result.status = "cancelled";
+        return;
+      }
+      onStage?.("提交恢复归档结清");
+      await store.settleRecoveredArchive(versionId);
+    } catch (error) {
+      uncertainWrite(error, "恢复归档结清");
+      return;
+    }
+    result.archiveRecorded = true;
+    result.status = "ok";
+    result.message = "远端已确认移除，绑定文件核验通过，归档已结清。";
+    onStage?.("恢复归档结清已提交");
+  }
+
+  function uncertainWrite(error: unknown, operation: string): void {
+    result.archiveRecorded = null;
+    result.fatalExecution = true;
+    result.message = `远端已确认移除，${operation}提交结果未知，归档结清未确认；已停止：${error instanceof Error ? error.message : String(error)}`;
+  }
 
   async function removeSavedPost(): Promise<void> {
     result.status = "failed";

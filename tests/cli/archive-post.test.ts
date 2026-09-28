@@ -1273,3 +1273,59 @@ test("P2-03 S2 删除意图后的真实许可等待可停止，保留意图且�
     }
   }
 }, 10000);
+
+async function seedPendingArchive() {
+  const root = await seed();
+  const first = await cli({ GMS_TEST_DELETE_STATUS: "503" });
+  expect(first.exitCode).toBe(1);
+  expect((await work())?.removal_state).toBe("pending");
+  return root;
+}
+
+function checkOptions(raw: Partial<RawDeleteResponse> = {}) {
+  const fake = options();
+  return {
+    requests: fake.requests,
+    connect: async () => ({
+      ...(await fake.connect()),
+      checkPost: async (id: string) => {
+        fake.requests.push(`check:${id}`);
+        return {
+          status: 404,
+          contentType: "application/json",
+          body: { code: 5, message: "Asset not found" },
+          finalUrl: `https://grok.com/rest/assets/${id}`,
+          method: "GET",
+          redirected: false,
+          ...raw,
+        };
+      },
+    }),
+  };
+}
+
+test("P2-04 S1 遗留意图先精确核对，先持久removed再核验绑定文件并结清", async () => {
+  await seedPendingArchive();
+  const fake = checkOptions();
+  let removalAtVerification: string | undefined;
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    new AbortController().signal,
+    (stage) => {
+      if (stage === "移除确认已提交") removalAtVerification = "committed";
+    },
+    fake.connect,
+  );
+  expect(result).toMatchObject({
+    status: "ok",
+    remoteObservation: "removed",
+    archiveRecorded: true,
+  });
+  expect(removalAtVerification).toBe("committed");
+  expect(fake.requests).toEqual([`check:${postId}`]);
+  expect(await work()).toMatchObject({
+    removal_state: "removed",
+    archive_settled: true,
+  });
+});

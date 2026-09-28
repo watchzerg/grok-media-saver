@@ -6,6 +6,7 @@ import {
 import type {
   PageResponse,
   PostResponse,
+  RawCheckResponse,
   RawDeleteResponse,
   RawPageResponse,
 } from "../grok/adapter";
@@ -27,6 +28,7 @@ export type BrowserSession = {
   getFirstPage(signal: AbortSignal): Promise<PageResponse>;
   getPostDetail(assetId: string, signal: AbortSignal): Promise<PostResponse>;
   downloadMedia: MediaSource;
+  checkPost(postId: string, signal: AbortSignal): Promise<RawCheckResponse>;
   deletePost(postId: string, signal: AbortSignal): Promise<RawDeleteResponse>;
   isConnected(): boolean;
   closePage(): Promise<void>;
@@ -136,6 +138,91 @@ export async function connectBrowserSession(
     throw new Error("检查已停止。");
   }
 
+  async function requestAsset(
+    postId: string,
+    signal: AbortSignal,
+    method: "GET" | "DELETE",
+  ): Promise<RawDeleteResponse> {
+    if (closed || disconnected)
+      throw new UnconfirmedStopError("Chrome Extension 连接已断开。");
+    if (signal.aborted) throw new Error(`归档已停止；未发起 ${method}。`);
+    if (
+      !page ||
+      page.isClosed() ||
+      new URL(page.url()).origin !== "https://grok.com"
+    )
+      throw new Error(`${method} 需要已确认的 Grok 页面。`);
+    const deletePage = page;
+    let rejectStopped!: (error: Error) => void;
+    const stopped = new Promise<never>((_, reject) => {
+      rejectStopped = reject;
+    });
+    const abort = () => {
+      void closeOwnedPage().then(
+        () => rejectStopped(new Error(`${method} 已停止；移除结果未知。`)),
+        (error) =>
+          rejectStopped(
+            new UnconfirmedStopError(`${method} 请求停止无法确认。`, {
+              cause: error,
+            }),
+          ),
+      );
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    const timer = setTimeout(abort, API_TIMEOUT_MS);
+    try {
+      if (signal.aborted) throw new Error(`归档已停止；未发起 ${method}。`);
+      onRequestStart();
+      const raw = await Promise.race([
+        deletePage.evaluate(
+          async ({ url, binding }) => {
+            const response = await fetch(url, {
+              method: binding,
+              credentials: "include",
+              redirect: "error",
+              cache: "no-store",
+            });
+            const text = await response.text();
+            let body: unknown = null;
+            try {
+              body = JSON.parse(text);
+            } catch {}
+            return {
+              status: response.status,
+              contentType: response.headers.get("content-type") ?? "",
+              body,
+              finalUrl: response.url,
+              method: binding,
+              redirected: response.redirected,
+              retryAfter: response.headers.get("retry-after"),
+            };
+          },
+          { url: postAssetUrl(postId), binding: method },
+        ),
+        stopped,
+      ]);
+      if (disconnected)
+        throw new UnconfirmedStopError(
+          `Chrome Extension 连接中断，无法确认 ${method} 请求已停止。`,
+        );
+      if (isAuthenticationPage(deletePage.url()))
+        return { ...raw, finalUrl: deletePage.url() };
+      return raw;
+    } catch (error) {
+      try {
+        await closeOwnedPage();
+      } catch (closeError) {
+        throw new UnconfirmedStopError(`${method} 请求停止无法确认。`, {
+          cause: closeError,
+        });
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abort);
+    }
+  }
+
   let listRouteInstalled = false;
 
   return {
@@ -143,85 +230,38 @@ export async function connectBrowserSession(
     cleanupBounded: true,
     isConnected: () => !closed && !disconnected,
     closePage: closeOwnedPage,
-    async deletePost(postId, signal) {
+    deletePost: (postId, signal) => requestAsset(postId, signal, "DELETE"),
+    async checkPost(postId, signal) {
       if (closed || disconnected)
         throw new UnconfirmedStopError("Chrome Extension 连接已断开。");
-      if (signal.aborted) throw new Error("归档已停止；未发起 DELETE。");
-      if (
-        !page ||
-        page.isClosed() ||
-        new URL(page.url()).origin !== "https://grok.com"
-      )
-        throw new Error("DELETE 需要已确认的 Grok Post 页面。");
-      const deletePage = page;
-      let rejectStopped!: (error: Error) => void;
-      const stopped = new Promise<never>((_, reject) => {
-        rejectStopped = reject;
-      });
-      const abort = () => {
-        void closeOwnedPage().then(
-          () => rejectStopped(new Error("DELETE 已停止；移除结果未知。")),
-          (error) =>
-            rejectStopped(
-              new UnconfirmedStopError("DELETE 请求停止无法确认。", {
-                cause: error,
-              }),
-            ),
-        );
-      };
-      signal.addEventListener("abort", abort, { once: true });
-      const timer = setTimeout(abort, API_TIMEOUT_MS);
-      try {
-        if (signal.aborted) throw new Error("归档已停止；未发起 DELETE。");
-        onRequestStart();
-        const raw = await Promise.race([
-          deletePage.evaluate(
-            async ({ url }) => {
-              const response = await fetch(url, {
-                method: "DELETE",
-                credentials: "include",
-                redirect: "error",
-                cache: "no-store",
-              });
-              const text = await response.text();
-              let body: unknown = null;
-              try {
-                body = JSON.parse(text);
-              } catch {}
-              return {
-                status: response.status,
-                contentType: response.headers.get("content-type") ?? "",
-                body,
-                finalUrl: response.url,
-                method: "DELETE",
-                redirected: response.redirected,
-                retryAfter: response.headers.get("retry-after"),
-              };
-            },
-            { url: postAssetUrl(postId), binding: "" },
-          ),
-          stopped,
-        ]);
-        if (disconnected)
-          throw new UnconfirmedStopError(
-            "Chrome Extension 连接中断，无法确认 DELETE 请求已停止。",
-          );
-        if (isAuthenticationPage(deletePage.url()))
-          return { ...raw, finalUrl: deletePage.url() };
-        return raw;
-      } catch (error) {
-        try {
-          await closeOwnedPage();
-        } catch (closeError) {
-          throw new UnconfirmedStopError("DELETE 请求停止无法确认。", {
-            cause: closeError,
+      if (signal.aborted) throw new Error("核对已停止。");
+      // 本地空白工作页只建立 Grok origin；不加载产品页，避免绕过许可的详情请求。
+      if (!page || page.isClosed()) {
+        page = await context.newPage();
+        closingPage = undefined;
+        listRouteInstalled = false;
+        const shellUrl = "https://grok.com/";
+        await page.route(shellUrl, async (route) => {
+          await route.fulfill({
+            status: 200,
+            contentType: "text/html",
+            body: "<!doctype html><title>Grok Media Saver</title>",
           });
+        });
+        try {
+          await withTimeout(
+            page.goto(shellUrl, {
+              waitUntil: "domcontentloaded",
+              timeout: API_TIMEOUT_MS,
+            }),
+            API_TIMEOUT_MS,
+          );
+        } catch (error) {
+          await closeOwnedPage();
+          throw error;
         }
-        throw error;
-      } finally {
-        clearTimeout(timer);
-        signal.removeEventListener("abort", abort);
       }
+      return requestAsset(postId, signal, "GET");
     },
     async downloadMedia(selection, onResponse, onChunk, signal) {
       if (closed || disconnected)

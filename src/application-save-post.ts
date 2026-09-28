@@ -10,13 +10,17 @@ import { cleanupPublishedTemp, publishIntent } from "./files/publish-intent";
 import { checkArchiveFile } from "./files/verify";
 import {
   type PostResponse,
+  parseCheckResponse,
   parseDeleteResponse,
+  type RawCheckResponse,
   type RawDeleteResponse,
 } from "./grok/adapter";
 import {
+  confirmRemoval,
   promoteArchiveWork,
   recordDeletionIntent,
   settleArchive,
+  settleRecoveredArchive,
 } from "./store/archive-work";
 import { connectDatabase, safeDatabaseError } from "./store/database";
 import {
@@ -49,6 +53,7 @@ import { verifySchema } from "./store/schema";
 export type SavePostSession = {
   getPostDetail(postId: string, signal: AbortSignal): Promise<PostResponse>;
   downloadMedia?: MediaSource;
+  checkPost?(postId: string, signal: AbortSignal): Promise<RawCheckResponse>;
   deletePost?(postId: string, signal: AbortSignal): Promise<RawDeleteResponse>;
   close(): Promise<void>;
   cleanupNotices?: string[];
@@ -70,7 +75,7 @@ export type SavePostResult = {
   // true: a saved fact for this Post was observed or committed; null: DB write outcome unknown.
   saveRecorded: boolean | null;
   cleanupErrors: string[];
-  remoteObservation?: "not-requested" | "unknown" | "removed";
+  remoteObservation?: "not-requested" | "unknown" | "removed" | "present";
   archiveRecorded?: boolean | null;
   fatalExecution?: boolean;
 };
@@ -115,6 +120,12 @@ export async function archivePostInRun(
     const archived = await archivePost({
       postId,
       goal: options.goal,
+      checkPost: async (id, checkSignal) => {
+        browser ??= await options.connect(checkSignal);
+        if (!browser.checkPost)
+          throw new Error("浏览器会话不支持精确 Post 核对 GET。");
+        return parseCheckResponse(id, await browser.checkPost(id, checkSignal));
+      },
       deletePost: async (id, deleteSignal) => {
         if (!browser?.deletePost)
           throw new Error("浏览器会话不支持精确 Post DELETE。");
@@ -189,6 +200,12 @@ export async function archivePostInRun(
           write(() => promoteArchiveWork(session, postId, runId)),
         recordDeletionIntent: (versionId) =>
           write(() => recordDeletionIntent(session, postId, versionId, runId)),
+        confirmRemoval: (versionId) =>
+          write(() => confirmRemoval(session, postId, versionId, runId)),
+        settleRecoveredArchive: (versionId) =>
+          write(() =>
+            settleRecoveredArchive(session, postId, versionId, runId),
+          ),
         settleArchive: (versionId) =>
           write(() => settleArchive(session, postId, versionId, runId)),
       },
