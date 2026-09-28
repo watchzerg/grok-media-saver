@@ -1,0 +1,374 @@
+{
+  "说明": "已授权关联移除实验的脱敏事件；不是产品删除状态或通用协议保证。",
+  "events": [
+    {
+      "time": "2026-09-28T06:28:27.868Z",
+      "group": "A",
+      "event": "local_verified",
+      "sample": "A_I",
+      "bytes": 176701,
+      "sha256": "2e7b8b2a792be36ddaefce9474419952582031e7fca4889c6faeb25be06246b4"
+    },
+    {
+      "time": "2026-09-28T06:28:27.869Z",
+      "group": "A",
+      "event": "local_verified",
+      "sample": "A_V",
+      "bytes": 1114163,
+      "sha256": "a3132240c22db6e5056347c92a76a8c0864894cd318f1fde3178e714e64b3df9"
+    },
+    {
+      "time": "2026-09-28T06:28:27.870Z",
+      "group": "A",
+      "event": "local_verified",
+      "sample": "A_I2",
+      "bytes": 236291,
+      "sha256": "d262daeaa88e338ce6a13a11115d8ce6d3e1ef5de3acf68b1182328cb3c1fd03"
+    },
+    {
+      "time": "2026-09-28T06:28:27.870Z",
+      "group": "A",
+      "event": "local_verified",
+      "sample": "A_I3",
+      "bytes": 208147,
+      "sha256": "2b2afe75e157de1bfc3ad38ced5a1179bb5095adc05f312aa0924d89d1b49631"
+    },
+    {
+      "time": "2026-09-28T06:28:27.871Z",
+      "group": "A",
+      "event": "local_verified",
+      "sample": "A_I4",
+      "bytes": 188093,
+      "sha256": "2713456a16985fdd4cb33b2f5815e578e66f3364e74b854493440d86fad71293"
+    },
+    {
+      "time": "2026-09-28T06:28:27.871Z",
+      "group": "A",
+      "event": "local_verified",
+      "sample": "B_I",
+      "bytes": 234325,
+      "sha256": "7a8f5a015382c7e6f12abea0f55cb3370e9e44f0d754d83c9afb2d4e16616338"
+    },
+    {
+      "time": "2026-09-28T06:28:27.872Z",
+      "group": "A",
+      "event": "local_verified",
+      "sample": "B_V",
+      "bytes": 1790709,
+      "sha256": "de11491ef6afa45bf1f87580dc55c194fb2ee170a36d9fae72ebf3eaf2d30dc9"
+    },
+    {
+      "time": "2026-09-28T06:28:30.114Z",
+      "group": "A",
+      "event": "detail_before",
+      "sample": "A_I",
+      "status": 200,
+      "identityMatch": true,
+      "mimeType": "image/jpeg",
+      "bytes": 176701
+    },
+    {
+      "time": "2026-09-28T06:28:34.971Z",
+      "group": "A",
+      "event": "detail_before",
+      "sample": "A_V",
+      "status": 200,
+      "identityMatch": true,
+      "mimeType": "video/mp4",
+      "bytes": 1114163
+    },
+    {
+      "time": "2026-09-28T06:28:39.980Z",
+      "group": "A",
+      "event": "detail_before",
+      "sample": "A_I2",
+      "status": 200,
+      "identityMatch": true,
+      "mimeType": "image/jpeg",
+      "bytes": 236291
+    },
+    {
+      "time": "2026-09-28T06:28:44.973Z",
+      "group": "A",
+      "event": "detail_before",
+      "sample": "A_I3",
+      "status": 200,
+      "identityMatch": true,
+      "mimeType": "image/jpeg",
+      "bytes": 208147
+    },
+    {
+      "time": "2026-09-28T06:28:49.971Z",
+      "group": "A",
+      "event": "detail_before",
+      "sample": "A_I4",
+      "status": 200,
+      "identityMatch": true,
+      "mimeType": "image/jpeg",
+      "bytes": 188093
+    },
+    {
+      "time": "2026-09-28T06:28:54.695Z",
+      "group": "A",
+      "event": "delete_request",
+      "method": "DELETE",
+      "target": "A_I",
+      "exactTargetMatch": true
+    },
+    {
+      "time": "2026-09-28T06:28:55.308Z",
+      "group": "A",
+      "event": "delete_response",
+      "target": "A_I",
+      "status": 200,
+      "contentType": "application/json",
+      "exactTargetMatch": true,
+      "emptyObject": true
+    },
+    {
+      "time": "2026-09-28T06:28:59.962Z",
+      "group": "A",
+      "event": "target_get_after",
+      "target": "A_I",
+      "status": 404,
+      "contentType": "application/json",
+      "exactTargetMatch": true,
+      "code": 5,
+      "assetNotFound": true
+    },
+    {
+      "time": "2026-09-28T06:29:04.978Z",
+      "group": "A",
+      "event": "retained_detail",
+      "sample": "A_V",
+      "status": 200,
+      "contentType": "application/json",
+      "identityMatch": true
+    },
+    {
+      "time": "2026-09-28T06:29:10.697Z",
+      "group": "A",
+      "event": "retained_media",
+      "sample": "A_V",
+      "status": 200,
+      "contentType": "video/mp4",
+      "contentLength": "1114163",
+      "bytes": 1114163,
+      "sha256": "a3132240c22db6e5056347c92a76a8c0864894cd318f1fde3178e714e64b3df9",
+      "matchesSaved": true
+    },
+    {
+      "time": "2026-09-28T06:29:14.982Z",
+      "group": "A",
+      "event": "retained_detail",
+      "sample": "A_I2",
+      "status": 200,
+      "contentType": "application/json",
+      "identityMatch": true
+    },
+    {
+      "time": "2026-09-28T06:29:20.445Z",
+      "group": "A",
+      "event": "retained_media",
+      "sample": "A_I2",
+      "status": 200,
+      "contentType": "image/jpeg",
+      "contentLength": "236291",
+      "bytes": 236291,
+      "sha256": "d262daeaa88e338ce6a13a11115d8ce6d3e1ef5de3acf68b1182328cb3c1fd03",
+      "matchesSaved": true
+    },
+    {
+      "time": "2026-09-28T06:29:24.989Z",
+      "group": "A",
+      "event": "retained_detail",
+      "sample": "A_I3",
+      "status": 200,
+      "contentType": "application/json",
+      "identityMatch": true
+    },
+    {
+      "time": "2026-09-28T06:29:30.091Z",
+      "group": "A",
+      "event": "retained_media",
+      "sample": "A_I3",
+      "status": 200,
+      "contentType": "image/jpeg",
+      "contentLength": "208147",
+      "bytes": 208147,
+      "sha256": "2b2afe75e157de1bfc3ad38ced5a1179bb5095adc05f312aa0924d89d1b49631",
+      "matchesSaved": true
+    },
+    {
+      "time": "2026-09-28T06:29:35.005Z",
+      "group": "A",
+      "event": "retained_detail",
+      "sample": "A_I4",
+      "status": 200,
+      "contentType": "application/json",
+      "identityMatch": true
+    },
+    {
+      "time": "2026-09-28T06:29:40.662Z",
+      "group": "A",
+      "event": "retained_media",
+      "sample": "A_I4",
+      "status": 200,
+      "contentType": "image/jpeg",
+      "contentLength": "188093",
+      "bytes": 188093,
+      "sha256": "2713456a16985fdd4cb33b2f5815e578e66f3364e74b854493440d86fad71293",
+      "matchesSaved": true
+    },
+    {
+      "time": "2026-09-28T06:29:40.662Z",
+      "group": "A",
+      "event": "complete",
+      "deleteCount": 1
+    },
+    {
+      "time": "2026-09-28T06:29:40.723Z",
+      "group": "A",
+      "event": "cleanup",
+      "success": true
+    },
+    {
+      "time": "2026-09-28T06:29:54.998Z",
+      "group": "B",
+      "event": "local_verified",
+      "sample": "A_I",
+      "bytes": 176701,
+      "sha256": "2e7b8b2a792be36ddaefce9474419952582031e7fca4889c6faeb25be06246b4"
+    },
+    {
+      "time": "2026-09-28T06:29:54.999Z",
+      "group": "B",
+      "event": "local_verified",
+      "sample": "A_V",
+      "bytes": 1114163,
+      "sha256": "a3132240c22db6e5056347c92a76a8c0864894cd318f1fde3178e714e64b3df9"
+    },
+    {
+      "time": "2026-09-28T06:29:55.000Z",
+      "group": "B",
+      "event": "local_verified",
+      "sample": "A_I2",
+      "bytes": 236291,
+      "sha256": "d262daeaa88e338ce6a13a11115d8ce6d3e1ef5de3acf68b1182328cb3c1fd03"
+    },
+    {
+      "time": "2026-09-28T06:29:55.000Z",
+      "group": "B",
+      "event": "local_verified",
+      "sample": "A_I3",
+      "bytes": 208147,
+      "sha256": "2b2afe75e157de1bfc3ad38ced5a1179bb5095adc05f312aa0924d89d1b49631"
+    },
+    {
+      "time": "2026-09-28T06:29:55.001Z",
+      "group": "B",
+      "event": "local_verified",
+      "sample": "A_I4",
+      "bytes": 188093,
+      "sha256": "2713456a16985fdd4cb33b2f5815e578e66f3364e74b854493440d86fad71293"
+    },
+    {
+      "time": "2026-09-28T06:29:55.001Z",
+      "group": "B",
+      "event": "local_verified",
+      "sample": "B_I",
+      "bytes": 234325,
+      "sha256": "7a8f5a015382c7e6f12abea0f55cb3370e9e44f0d754d83c9afb2d4e16616338"
+    },
+    {
+      "time": "2026-09-28T06:29:55.002Z",
+      "group": "B",
+      "event": "local_verified",
+      "sample": "B_V",
+      "bytes": 1790709,
+      "sha256": "de11491ef6afa45bf1f87580dc55c194fb2ee170a36d9fae72ebf3eaf2d30dc9"
+    },
+    {
+      "time": "2026-09-28T06:29:58.294Z",
+      "group": "B",
+      "event": "detail_before",
+      "sample": "B_V",
+      "status": 200,
+      "identityMatch": true,
+      "mimeType": "video/mp4",
+      "bytes": 1790709
+    },
+    {
+      "time": "2026-09-28T06:30:03.183Z",
+      "group": "B",
+      "event": "detail_before",
+      "sample": "B_I",
+      "status": 200,
+      "identityMatch": true,
+      "mimeType": "image/jpeg",
+      "bytes": 234325
+    },
+    {
+      "time": "2026-09-28T06:30:07.893Z",
+      "group": "B",
+      "event": "delete_request",
+      "method": "DELETE",
+      "target": "B_V",
+      "exactTargetMatch": true
+    },
+    {
+      "time": "2026-09-28T06:30:08.491Z",
+      "group": "B",
+      "event": "delete_response",
+      "target": "B_V",
+      "status": 200,
+      "contentType": "application/json",
+      "exactTargetMatch": true,
+      "emptyObject": true
+    },
+    {
+      "time": "2026-09-28T06:30:13.173Z",
+      "group": "B",
+      "event": "target_get_after",
+      "target": "B_V",
+      "status": 404,
+      "contentType": "application/json",
+      "exactTargetMatch": true,
+      "code": 5,
+      "assetNotFound": true
+    },
+    {
+      "time": "2026-09-28T06:30:18.188Z",
+      "group": "B",
+      "event": "retained_detail",
+      "sample": "B_I",
+      "status": 200,
+      "contentType": "application/json",
+      "identityMatch": true
+    },
+    {
+      "time": "2026-09-28T06:30:24.067Z",
+      "group": "B",
+      "event": "retained_media",
+      "sample": "B_I",
+      "status": 200,
+      "contentType": "image/jpeg",
+      "contentLength": "234325",
+      "bytes": 234325,
+      "sha256": "7a8f5a015382c7e6f12abea0f55cb3370e9e44f0d754d83c9afb2d4e16616338",
+      "matchesSaved": true
+    },
+    {
+      "time": "2026-09-28T06:30:24.067Z",
+      "group": "B",
+      "event": "complete",
+      "deleteCount": 1
+    },
+    {
+      "time": "2026-09-28T06:30:24.129Z",
+      "group": "B",
+      "event": "cleanup",
+      "success": true
+    }
+  ]
+}

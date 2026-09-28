@@ -7,7 +7,7 @@
 | 目录 | 职责 | 当前入口 |
 | --- | --- | --- |
 | `agents/` | agent 工作流与详细规则 | [Beads](agents/issue-tracker.md)、[triage labels](agents/triage-labels.md)、[领域文档规则](agents/domain.md)、[测试设计与验收](agents/testing.md) |
-| `specs/` | 已确认、需要在仓库中维护的产品或配置契约 | [产品目标与首版范围](specs/product-goals.md)、[一期可靠保存规格](specs/phase1-saving.md) |
+| `specs/` | 已确认、需要在仓库中维护的产品或配置契约 | [产品目标与首版范围](specs/product-goals.md)、[一期可靠保存规格](specs/phase1-saving.md)、[二期单 Post 完整归档规格](specs/phase2-archiving.md) |
 | `research/` | 带版本和观察时点的调研、实验与证据 | [一期验收记录](research/phase1-acceptance.md)、[归档核心模型与 HTTP 参考](research/core-archive-model-and-http.md)、[Playwright Extension 媒体下载验证](research/2026-09-25-grok-playwright-extension-demo.md) |
 | `development/` | 实现路线、开发、构建、测试与依赖维护说明 | [一期开发者运行与恢复](development/phase1-runbook.md)、[实现路线图](development/implementation-roadmap.md)、[技术选型与依赖管理](development/technology-stack.md) |
 
@@ -30,11 +30,16 @@
 - [PostgreSQL 事务与执行器互斥](research/phase1-postgres-boundaries.md)
 - [文件无覆盖发布与恢复](research/phase1-file-publication.md)
 
+## 二期研究入口
+
+- [关联移除实验记录](research/phase2-association-removal-experiment.md)：两组已授权 DELETE、同目标查询和关联媒体完整比较；包含前置保存、故障接续与证据边界。
+
 ## 权威来源与适用范围
 
 - 本仓库的 issue、spec、执行计划与验收记录以 Beads 为入口，操作规则见 [Beads 约定](agents/issue-tracker.md)。[产品目标与首版范围](specs/product-goals.md)是已确认目标的权威正文；后续具体规格与计划引用该文档，不重复维护目标正文。
 - `CONTEXT.md` 定义领域词汇，[ARCHITECTURE.md](../ARCHITECTURE.md)定义已接受的模块职责与架构决定，ADR 记录重要决策及其理由。现有内容与后续变更冲突时，先明确冲突并更新权威来源。
 - [一期可靠保存规格](specs/phase1-saving.md)维护一期行为、持久事实、恢复及 Testing Decisions；Beads 决策票保留过程与确认记录，后续实现票引用规格。
+- [二期单 Post 完整归档规格](specs/phase2-archiving.md)维护归档目标、删除资格与判据、持久删除事实、恢复及二期 Testing Decisions；对一期明确扩展的行为以二期为准，未变更的保存契约继续引用一期。`grok-media-saver-we2` 保留决策来源，详细契约由二期规格承接。
 - [技术选型与依赖管理](development/technology-stack.md)维护工具和依赖政策；当前版本以配置与 lockfile 为准。根 [justfile](../justfile)及其调用代码定义实际命令行为。
 - [测试设计与验收](agents/testing.md)维护按改动选择验证的规则及共享流程入口；具体规格维护行为覆盖、approved seams 和现场验收要求。
 - `research/` 记录观察和证据；研究建议本身不构成产品合同。
