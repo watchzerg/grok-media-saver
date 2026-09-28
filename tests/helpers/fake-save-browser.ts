@@ -136,7 +136,9 @@ mock.module("../../src/browser/session.ts", () => ({
               const image = Buffer.from(
                 video
                   ? "000000186674797069736f6d0000000069736f6d"
-                  : "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489",
+                  : process.env.GMS_TEST_PNG_DECLARED_JPEG === "1"
+                    ? "ffd8ffe000104a464946000101000001ffd9"
+                    : "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489",
                 "hex",
               );
               if (process.env.GMS_TEST_CONFLICT_ID === currentPostId) {

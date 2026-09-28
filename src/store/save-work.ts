@@ -10,6 +10,7 @@ export type Work = {
   selectedKey: string | null;
   quality: string | null;
   mimeType: string | null;
+  sourceMimeType: string | null;
   expectedBytes: string | null;
   savedMediaVersionId: string | null;
   tempName: string | null;
@@ -25,7 +26,7 @@ async function readWork(
   const [work] = await session<Work[]>`
     SELECT goal, archive_settled AS "archiveSettled", removal_state AS "removalState",
       deletion_media_version_id::text AS "deletionMediaVersionId", status, selected_key AS "selectedKey", quality,
-      mime_type AS "mimeType", expected_bytes::text AS "expectedBytes",
+      mime_type AS "mimeType", source_mime_type AS "sourceMimeType", expected_bytes::text AS "expectedBytes",
       saved_media_version_id::text AS "savedMediaVersionId",
       publish_temp_name AS "tempName",
       publish_relative_path AS "relativePath",
@@ -196,6 +197,7 @@ export async function markNeedsDownload(
     UPDATE post_work SET status = 'pending', last_run_id = ${runId}::uuid,
       selected_key = ${selection.key ?? null},
       quality = ${selection.quality}, mime_type = ${selection.mimeType},
+      source_mime_type = ${selection.mimeType},
       expected_bytes = ${"expectedBytes" in selection ? (selection.expectedBytes ?? null) : null},
       last_error = '需要下载当前来源'
     WHERE post_id = ${postId}
@@ -223,7 +225,7 @@ export async function recordPublishIntent(
   const updated = await session<{ post_id: string }[]>`
     UPDATE post_work SET status = 'finalizing', last_run_id = ${runId}::uuid,
       selected_key = ${selection.key ?? null}, quality = ${selection.quality},
-      mime_type = ${intent.mimeType}, expected_bytes = ${selection.expectedBytes ?? null},
+      mime_type = ${intent.mimeType}, source_mime_type = ${selection.mimeType}, expected_bytes = ${selection.expectedBytes ?? null},
       publish_temp_name = ${intent.tempName}, publish_relative_path = ${intent.relativePath},
       publish_expected_bytes = ${intent.publishBytes}::bigint, publish_sha256 = ${intent.sha256},
       last_error = NULL
@@ -236,7 +238,8 @@ export async function recordPublishIntent(
           AND byte_count = ${intent.publishBytes}::bigint AND mime_type = ${intent.mimeType}
           AND relative_path = ${intent.relativePath})
         AND selected_key IS NOT DISTINCT FROM ${selection.key ?? null}
-        AND quality = ${selection.quality}))
+        AND quality = ${selection.quality}
+        AND source_mime_type = ${selection.mimeType}))
     RETURNING post_id
   `;
   if (updated.length !== 1)

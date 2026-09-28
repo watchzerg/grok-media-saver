@@ -535,7 +535,12 @@ export async function archivePost({
           return false;
         }
       }
-      if (!boundWork.selectedKey || !boundWork.quality || !downloadMedia)
+      if (
+        !boundWork.selectedKey ||
+        !boundWork.quality ||
+        !boundWork.sourceMimeType ||
+        !downloadMedia
+      )
         throw new MediaCapabilityUnavailableError(
           "绑定媒体原来源或下载能力不可用。",
         );
@@ -543,7 +548,7 @@ export async function archivePost({
         assetId: postId,
         key: boundWork.selectedKey,
         quality: boundWork.quality as PostMediaSelection["quality"],
-        mimeType: version.mimeType,
+        mimeType: boundWork.sourceMimeType,
         expectedBytes: Number(version.byteCount),
       };
       for (let attempt = 1; attempt <= 2; attempt += 1) {

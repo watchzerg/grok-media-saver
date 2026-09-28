@@ -2318,6 +2318,75 @@ test("P2-07 S1 已移除缺失文件仅从绑定来源补回原版本", async ()
   });
 });
 
+test.each(["S1", "S2"])(
+  "P2-07 %s PNG声明JPEG原来源补救保留实际类型与绑定版本",
+  async (seam) => {
+    const root = await seed();
+    const jpeg = Buffer.from("ffd8ffe000104a464946000101000001ffd9", "hex");
+    const first = await cli({
+      GMS_TEST_DELETE_STATUS: "503",
+      GMS_TEST_PNG_DECLARED_JPEG: "1",
+    });
+    expect(first.exitCode).toBe(1);
+    const before = await work();
+    const [version] =
+      await testSql`SELECT * FROM media_versions WHERE post_id=${postId}`;
+    expect(version?.mime_type).toBe("image/jpeg");
+    const path = join(root, String(version?.relative_path));
+    await rm(path);
+    await testSql`UPDATE post_work SET removal_state='removed' WHERE post_id=${postId}`;
+    const events = join(root, "jpeg-bound-requests");
+    if (seam === "S2") {
+      const result = await cli({
+        GMS_TEST_PNG_DECLARED_JPEG: "1",
+        GMS_TEST_REQUEST_EVENTS: events,
+      });
+      expect(result.exitCode, result.stderr).toBe(0);
+      expect(
+        (await readFile(events, "utf8"))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line).kind),
+      ).toEqual(["media"]);
+    } else {
+      const fake = options();
+      const result = await archiveSelectedPost(
+        config(),
+        postId,
+        new AbortController().signal,
+        undefined,
+        async () => ({
+          ...(await fake.connect()),
+          downloadMedia: async (_selection, response, chunk) => {
+            fake.requests.push("media");
+            await response({
+              status: 200,
+              contentType: "image/png",
+              contentLength: String(jpeg.length),
+              contentEncoding: null,
+            });
+            await chunk(jpeg);
+          },
+        }),
+      );
+      expect(result.status, result.message).toBe("ok");
+      expect(fake.requests).toEqual(["media"]);
+    }
+    expect(await readFile(path)).toEqual(jpeg);
+    expect(await work()).toMatchObject({
+      mime_type: "image/jpeg",
+      source_mime_type: "image/png",
+      deletion_media_version_id: before?.deletion_media_version_id,
+      removal_state: "removed",
+      archive_settled: true,
+    });
+    const versions =
+      await testSql`SELECT * FROM media_versions WHERE post_id=${postId}`;
+    expect(versions).toHaveLength(1);
+    expect(versions[0]).toEqual(version);
+  },
+);
+
 test.each(["临时文件", "正式文件"])(
   "P2-07 S1 优先恢复%s发布意图而不请求媒体",
   async (kind) => {
