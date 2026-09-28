@@ -10,10 +10,11 @@ export async function startSaveRun(
   session: ReservedSQL,
   runId: string,
   postId: string,
+  goal: "save" | "archive" = "save",
 ): Promise<void> {
   await session`
     INSERT INTO runs (id, command, target_post_id, started_at)
-    VALUES (${runId}::uuid, 'save-post', ${postId}, now())
+    VALUES (${runId}::uuid, ${goal === "archive" ? "archive-post" : "save-post"}, ${postId}, now())
   `;
 }
 

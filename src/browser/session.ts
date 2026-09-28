@@ -6,12 +6,14 @@ import {
 import type {
   PageResponse,
   PostResponse,
+  RawDeleteResponse,
   RawPageResponse,
 } from "../grok/adapter";
 import {
   isRetryableNetworkFailure,
   parsePostDetailResponse,
   parseSavedPageResponse,
+  postAssetUrl,
   RetryableRequestError,
   UnconfirmedStopError,
 } from "../grok/adapter";
@@ -25,10 +27,12 @@ export type BrowserSession = {
   getFirstPage(signal: AbortSignal): Promise<PageResponse>;
   getPostDetail(assetId: string, signal: AbortSignal): Promise<PostResponse>;
   downloadMedia: MediaSource;
+  deletePost(postId: string, signal: AbortSignal): Promise<RawDeleteResponse>;
   isConnected(): boolean;
   closePage(): Promise<void>;
   close(): Promise<void>;
   cleanupNotices: string[];
+  cleanupBounded: true;
 };
 
 export async function connectBrowserSession(
@@ -136,8 +140,89 @@ export async function connectBrowserSession(
 
   return {
     cleanupNotices,
+    cleanupBounded: true,
     isConnected: () => !closed && !disconnected,
     closePage: closeOwnedPage,
+    async deletePost(postId, signal) {
+      if (closed || disconnected)
+        throw new UnconfirmedStopError("Chrome Extension 连接已断开。");
+      if (signal.aborted) throw new Error("归档已停止；未发起 DELETE。");
+      if (
+        !page ||
+        page.isClosed() ||
+        new URL(page.url()).origin !== "https://grok.com"
+      )
+        throw new Error("DELETE 需要已确认的 Grok Post 页面。");
+      const deletePage = page;
+      let rejectStopped!: (error: Error) => void;
+      const stopped = new Promise<never>((_, reject) => {
+        rejectStopped = reject;
+      });
+      const abort = () => {
+        void closeOwnedPage().then(
+          () => rejectStopped(new Error("DELETE 已停止；移除结果未知。")),
+          (error) =>
+            rejectStopped(
+              new UnconfirmedStopError("DELETE 请求停止无法确认。", {
+                cause: error,
+              }),
+            ),
+        );
+      };
+      signal.addEventListener("abort", abort, { once: true });
+      const timer = setTimeout(abort, API_TIMEOUT_MS);
+      try {
+        if (signal.aborted) throw new Error("归档已停止；未发起 DELETE。");
+        onRequestStart();
+        const raw = await Promise.race([
+          deletePage.evaluate(
+            async ({ url }) => {
+              const response = await fetch(url, {
+                method: "DELETE",
+                credentials: "include",
+                redirect: "error",
+                cache: "no-store",
+              });
+              const text = await response.text();
+              let body: unknown = null;
+              try {
+                body = JSON.parse(text);
+              } catch {}
+              return {
+                status: response.status,
+                contentType: response.headers.get("content-type") ?? "",
+                body,
+                finalUrl: response.url,
+                method: "DELETE",
+                redirected: response.redirected,
+                retryAfter: response.headers.get("retry-after"),
+              };
+            },
+            { url: postAssetUrl(postId), binding: "" },
+          ),
+          stopped,
+        ]);
+        if (disconnected)
+          throw new UnconfirmedStopError(
+            "Chrome Extension 连接中断，无法确认 DELETE 请求已停止。",
+          );
+        if (isAuthenticationPage(deletePage.url()))
+          return { ...raw, finalUrl: deletePage.url() };
+        return raw;
+      } catch (error) {
+        try {
+          await closeOwnedPage();
+        } catch (closeError) {
+          throw new UnconfirmedStopError("DELETE 请求停止无法确认。", {
+            cause: closeError,
+          });
+        }
+        throw error;
+      } finally {
+        clearTimeout(timer);
+        signal.removeEventListener("abort", abort);
+      }
+    },
     async downloadMedia(selection, onResponse, onChunk, signal) {
       if (closed || disconnected)
         throw new UnconfirmedStopError("Chrome Extension 连接已断开。");
@@ -490,6 +575,10 @@ export async function connectBrowserSession(
         rejectDeadline = reject;
       });
       const routePostDetail = async (route: PageRouteLike) => {
+        if (route.request().method() !== "GET") {
+          await route.continue();
+          return;
+        }
         if (signal.aborted || requestTimedOut || preRequestTimedOut) {
           await route.abort();
           return;

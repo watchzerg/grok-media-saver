@@ -19,7 +19,7 @@ import type {
 } from "./config";
 import { PublishConflictError } from "./files/publish-intent";
 import { checkArchiveFile } from "./files/verify";
-import { RetryableRequestError } from "./grok/adapter";
+import { normalizePostId, RetryableRequestError } from "./grok/adapter";
 import { createRequestScheduler } from "./grok/request-scheduler";
 import { connectDatabase, safeDatabaseError } from "./store/database";
 import {
@@ -865,6 +865,41 @@ export async function saveSelectedPost(
     maxSeconds: config.requestIntervalMaxSeconds,
   });
   return savePost(config, postId, {
+    signal,
+    onStage,
+    waitBeforeRetry: scheduler.beforeRequest,
+    connect:
+      connect ??
+      ((connectSignal) =>
+        connectBrowserSession(
+          config.savedPageUrl,
+          scheduler.requestStarted,
+          connectSignal,
+        )),
+  });
+}
+
+export async function archiveSelectedPost(
+  config: SaveConfig,
+  postId: string,
+  signal: AbortSignal,
+  onStage?: (stage: string) => void,
+  connect?: SavePostOptions["connect"],
+) {
+  const normalized = normalizePostId(postId);
+  if (!normalized)
+    return {
+      status: "failed" as const,
+      message: "Post ID 必须是带连字符的 UUID。",
+      saveRecorded: false,
+      cleanupErrors: [],
+    };
+  const scheduler = createRequestScheduler({
+    minSeconds: config.requestIntervalMinSeconds,
+    maxSeconds: config.requestIntervalMaxSeconds,
+  });
+  return savePost(config, normalized, {
+    goal: "archive",
     signal,
     onStage,
     waitBeforeRetry: scheduler.beforeRequest,

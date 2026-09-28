@@ -1,4 +1,5 @@
 import {
+  archiveSelectedPost,
   initializeProjectDatabase,
   inspectSavedFirstPage,
   inspectSavedPost,
@@ -19,7 +20,7 @@ import {
 import { normalizePostId } from "./grok/adapter";
 
 const usage =
-  "用法：grok-media-saver db init | status | retry | verify <Post ID> | inspect first-page | inspect post <Post ID> | save first-page | save post <Post ID>";
+  "用法：grok-media-saver db init | status | retry | verify <Post ID> | inspect first-page | inspect post <Post ID> | save first-page | save post <Post ID> | archive post <Post ID>";
 
 type CliDependencies = {
   initializeProjectDatabase: typeof initializeProjectDatabase;
@@ -43,6 +44,8 @@ export async function main(
     args.length === 3 && args[0] === "inspect" && args[1] === "post";
   const isSavePost =
     args.length === 3 && args[0] === "save" && args[1] === "post";
+  const isArchivePost =
+    args.length === 3 && args[0] === "archive" && args[1] === "post";
   if (isDatabaseInit) {
     let config: DatabaseConfig;
     try {
@@ -131,18 +134,18 @@ export async function main(
       process.off("SIGINT", stop);
     }
   }
-  if (!isFirstPage && !isPost && !isVerify && !isSavePost) {
+  if (!isFirstPage && !isPost && !isVerify && !isSavePost && !isArchivePost) {
     console.error(usage);
     return 2;
   }
 
   const assetId =
-    isPost || isSavePost
+    isPost || isSavePost || isArchivePost
       ? normalizePostId(args[2])
       : isVerify
         ? normalizePostId(args[1])
         : undefined;
-  if ((isPost || isSavePost || isVerify) && !assetId) {
+  if ((isPost || isSavePost || isArchivePost || isVerify) && !assetId) {
     console.error("Post ID 必须是带连字符的 UUID。");
     return 2;
   }
@@ -161,7 +164,7 @@ export async function main(
     return result.status === "ok" ? 0 : 1;
   }
 
-  if (isSavePost) {
+  if (isSavePost || isArchivePost) {
     let config: ReturnType<typeof readSaveConfig>;
     try {
       config = readSaveConfig(env);
@@ -181,7 +184,9 @@ export async function main(
     };
     process.on("SIGINT", stop);
     try {
-      const result = await saveSelectedPost(
+      const result = await (isArchivePost
+        ? archiveSelectedPost
+        : saveSelectedPost)(
         config,
         assetId as string,
         controller.signal,

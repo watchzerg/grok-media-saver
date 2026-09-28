@@ -1,5 +1,5 @@
 import type { PostMediaSelection, PostResponse } from "../grok/adapter";
-import { RetryableRequestError } from "../grok/adapter";
+import { type DeleteResponse, RetryableRequestError } from "../grok/adapter";
 import { KnownSaveFailure, type Work } from "../store/save-work";
 import {
   BlockedMediaError,
@@ -46,6 +46,9 @@ type Store = {
   ): Promise<void>;
   failDownload(postId: string, runId: string, reason: string): Promise<void>;
   assertLock(): Promise<void>;
+  promoteArchiveWork?(): Promise<void>;
+  recordDeletionIntent?(versionId: string): Promise<void>;
+  settleArchive?(versionId: string): Promise<void>;
 };
 
 export async function archivePost({
@@ -60,8 +63,12 @@ export async function archivePost({
   hasMediaCapability,
   mediaTimeouts,
   runId,
+  goal = "save",
+  deletePost,
 }: {
   postId: string;
+  goal?: "save" | "archive";
+  deletePost?: (postId: string, signal: AbortSignal) => Promise<DeleteResponse>;
   files: FileCapabilities;
   signal: AbortSignal;
   onStage?: (stage: string) => void;
@@ -80,6 +87,9 @@ export async function archivePost({
     cleanupErrors: string[];
     unprocessed?: boolean;
     alreadySettled?: boolean;
+    remoteObservation?: "not-requested" | "unknown" | "removed";
+    archiveRecorded?: boolean | null;
+    fatalExecution?: boolean;
   } = {
     status: "failed",
     message: "Post 保存未完成。",
@@ -91,15 +101,33 @@ export async function archivePost({
       ...result,
       status: "ok" as const,
       alreadySettled: true,
+      ...(goal === "archive"
+        ? { archiveRecorded: true, remoteObservation: "not-requested" as const }
+        : {}),
       message: "Post 已归档结清，本次直接跳过。",
     };
   }
-  if (work?.goal === "archive") {
+  if (work?.goal === "archive" && goal === "save") {
     return {
       ...result,
       unprocessed: true,
       message: `Post ${postId} 为未结清 archive 工作，本次未处理；请使用 archive post ${postId} 或 retry 接续归档。`,
     };
+  }
+  if (goal === "archive") {
+    result.remoteObservation = "not-requested";
+    result.archiveRecorded = false;
+    if (work?.removalState && work.removalState !== "none") {
+      result.remoteObservation =
+        work.removalState === "removed" ? "removed" : "unknown";
+      result.message =
+        work.removalState === "removed"
+          ? "远端已确认移除，归档尚未结清；请接续绑定版本核验。"
+          : "移除结果未知，删除意图待核对；本次不重发 DELETE。";
+      return result;
+    }
+    await store.promoteArchiveWork?.();
+    work = await store.readWork(postId);
   }
   if (!work) {
     await store.startWork(postId, runId);
@@ -200,7 +228,115 @@ export async function archivePost({
       await saveDownloaded(detail.selection);
     }
   }
+  if (goal === "archive" && result.status === "ok") await removeSavedPost();
   return result;
+
+  async function removeSavedPost(): Promise<void> {
+    result.status = "failed";
+    result.message = "Post 已保存，归档未完成；尚未发起移除。";
+    if (!deletePost || !store.recordDeletionIntent || !store.settleArchive)
+      throw new Error("浏览器会话不支持精确 Post DELETE。");
+    if (signal.aborted) {
+      result.status = "cancelled";
+      return;
+    }
+    await store.assertLock();
+    const before = await store.readWork(postId);
+    if (
+      before?.status !== "saved" ||
+      !before.savedMediaVersionId ||
+      before.relativePath ||
+      before.removalState !== "none"
+    )
+      throw new Error("保存或删除资格无法确认，未发起 DELETE。");
+    const versionId = before.savedMediaVersionId;
+    onStage?.("提交删除意图");
+    try {
+      await store.recordDeletionIntent(versionId);
+    } catch (error) {
+      result.archiveRecorded = null;
+      result.fatalExecution = true;
+      result.message = `Post 已保存，删除意图提交结果未知，归档未完成；已停止且未发起 DELETE：${error instanceof Error ? error.message : String(error)}`;
+      return;
+    }
+    onStage?.("删除意图已提交");
+    await waitBeforeRetry(signal);
+    await store.assertLock();
+    if (signal.aborted) {
+      result.status = "cancelled";
+      result.message = "归档已停止；删除意图待核对，未发起 DELETE。";
+      return;
+    }
+    const bound = await store.readWork(postId);
+    if (
+      bound?.removalState !== "pending" ||
+      bound.deletionMediaVersionId !== versionId ||
+      bound.savedMediaVersionId !== versionId
+    )
+      throw new Error("发送前的删除绑定发生变化，未发起 DELETE。");
+    onStage?.("发送精确 DELETE");
+    if (signal.aborted) {
+      result.status = "cancelled";
+      return;
+    }
+    result.remoteObservation = "unknown";
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let rejectStop!: (error: Error) => void;
+    const stopped = new Promise<never>((_, reject) => {
+      rejectStop = reject;
+    });
+    const abort = () => {
+      controller.abort();
+      rejectStop(new Error("归档已停止；移除结果未知，待核对。"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    timer = setTimeout(() => {
+      controller.abort();
+      rejectStop(new Error("DELETE 超过 30 秒总期限；移除结果未知，待核对。"));
+    }, 30_000);
+    let parsed: DeleteResponse;
+    try {
+      parsed = await Promise.race([
+        deletePost(postId, controller.signal),
+        stopped,
+      ]);
+    } catch (error) {
+      result.status = signal.aborted ? "cancelled" : "failed";
+      result.fatalExecution = true;
+      result.message = `Post 已保存，移除结果未知，待核对；归档未完成：${error instanceof Error ? error.message : String(error)}`;
+      return;
+    } finally {
+      if (timer) clearTimeout(timer);
+      signal.removeEventListener("abort", abort);
+    }
+    if (parsed.kind !== "removed") {
+      result.status = parsed.kind === "blocked" ? "blocked" : "failed";
+      result.message =
+        parsed.kind === "blocked"
+          ? `DELETE 被阻挡（HTTP ${parsed.status}）${parsed.retryAfter ? `；服务端建议等待 ${parsed.retryAfter}` : ""}；移除结果未知，待核对；Post 已保存，归档未完成。`
+          : "DELETE 未取得认可响应；移除结果未知，待核对；Post 已保存，归档未完成。";
+      return;
+    }
+    result.remoteObservation = "removed";
+    onStage?.("远端已确认移除");
+    try {
+      await store.assertLock();
+      onStage?.("提交归档结清");
+      await store.settleArchive(versionId);
+    } catch (error) {
+      result.archiveRecorded = null;
+      result.fatalExecution = true;
+      result.message = `本次已确认远端移除，数据库提交结果未知，归档结清未确认：${error instanceof Error ? error.message : String(error)}`;
+      return;
+    }
+    result.archiveRecorded = true;
+    result.status = signal.aborted ? "cancelled" : "ok";
+    result.message = signal.aborted
+      ? "归档已停止；本次远端已确认移除，归档已结清。"
+      : "Post 已保存，本次远端已确认移除，归档已结清。";
+    onStage?.("归档结清已提交");
+  }
 
   async function saveDownloaded(initial: PostMediaSelection): Promise<void> {
     if (!downloadMedia || (hasMediaCapability && !hasMediaCapability())) {

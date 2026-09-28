@@ -210,3 +210,53 @@ export function isRetryableNetworkFailure(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return error.name === "TypeError" || error.name === "TimeoutError";
 }
+
+export type RawDeleteResponse = {
+  status: number;
+  contentType: string;
+  body: unknown;
+  finalUrl: string;
+  method: string;
+  redirected: boolean;
+  retryAfter?: string | null;
+};
+
+export function postAssetUrl(postId: string): string {
+  const id = normalizePostId(postId);
+  if (!id) throw new Error("Post ID 必须是带连字符的 UUID。");
+  return `https://grok.com/rest/assets/${id}`;
+}
+
+export type DeleteResponse =
+  | { kind: "removed" }
+  | { kind: "unknown" }
+  | { kind: "blocked"; status: number; retryAfter?: string | null };
+export function parseDeleteResponse(
+  postId: string,
+  response: RawDeleteResponse,
+): DeleteResponse {
+  if (
+    response.status === 401 ||
+    response.status === 429 ||
+    /\/(?:login|signin|challenge|tos-gate)(?:\/|$)/i.test(response.finalUrl)
+  )
+    return {
+      kind: "blocked",
+      status: response.status,
+      retryAfter: response.retryAfter,
+    };
+  if (
+    response.method !== "DELETE" ||
+    response.redirected ||
+    response.finalUrl !== postAssetUrl(postId) ||
+    response.status !== 200 ||
+    response.contentType.split(";")[0]?.trim().toLowerCase() !==
+      "application/json" ||
+    response.body === null ||
+    typeof response.body !== "object" ||
+    Array.isArray(response.body) ||
+    Object.keys(response.body).length !== 0
+  )
+    return { kind: "unknown" };
+  return { kind: "removed" };
+}

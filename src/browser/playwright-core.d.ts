@@ -49,7 +49,7 @@ type PageLike = {
 };
 
 type PageRouteLike = {
-  request(): { url(): string };
+  request(): { url(): string; method(): string };
   abort(): Promise<void>;
   continue(): Promise<void>;
 };

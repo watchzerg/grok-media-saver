@@ -20,6 +20,7 @@ import {
   publishIntent,
 } from "../../src/files/publish-intent";
 import { databaseEnv, testSql, useIsolatedPostgres } from "../helpers/postgres";
+import { seedSettledArchive } from "../helpers/seed-settled-archive";
 
 useIsolatedPostgres();
 
@@ -1497,8 +1498,9 @@ test("P2-01 S2 混合 retry 不降级 archive 或遗漏已保存未结清工作"
     await testSql`INSERT INTO post_work (post_id, goal, status, archive_settled, last_error)
       VALUES (${ids[0]}, 'archive', 'pending', false, '保留现场'),
       (${ids[1]}, 'archive', 'saved', false, '等待结清'),
-      (${ids[2]}, 'archive', 'saved', true, null),
+      (${ids[2]}, 'archive', 'saved', false, null),
       (${ids[3]}, 'save', 'pending', false, null)`;
+    await seedSettledArchive(testSql, ids[2] as string);
     const before =
       await testSql`SELECT * FROM post_work WHERE goal = 'archive' ORDER BY post_id`;
     const result = await runFakeRetry({

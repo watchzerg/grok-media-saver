@@ -166,6 +166,21 @@ mock.module("../../src/browser/session.ts", () => ({
             },
           }
         : {}),
+      deletePost: async (postId: string) => {
+        recordRequest("delete", postId);
+        return {
+          status: Number(process.env.GMS_TEST_DELETE_STATUS ?? 200),
+          contentType:
+            process.env.GMS_TEST_DELETE_CONTENT_TYPE ?? "application/json",
+          body: JSON.parse(process.env.GMS_TEST_DELETE_BODY ?? "{}"),
+          finalUrl:
+            process.env.GMS_TEST_DELETE_URL ??
+            `https://grok.com/rest/assets/${postId}`,
+          method: process.env.GMS_TEST_DELETE_METHOD ?? "DELETE",
+          redirected: process.env.GMS_TEST_DELETE_REDIRECTED === "1",
+          retryAfter: "60",
+        };
+      },
       isConnected: () => connected,
       closePage: async () => {
         recordBrowser("close-page");

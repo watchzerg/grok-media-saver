@@ -30,13 +30,13 @@ const schema: readonly Table[] = [
       ["runs_pkey", "PRIMARY KEY (id)"],
       [
         "runs_command_check",
-        "CHECK (command = ANY (ARRAY['save-first-page'::text, 'save-post'::text, 'retry'::text]))",
+        "CHECK (command = ANY (ARRAY['save-first-page'::text, 'save-post'::text, 'retry'::text, 'archive-post'::text]))",
       ],
     ],
     create: `CREATE TABLE runs (
       id uuid PRIMARY KEY,
       command text NOT NULL CONSTRAINT runs_command_check
-        CHECK (command IN ('save-first-page', 'save-post', 'retry')),
+        CHECK (command IN ('save-first-page', 'save-post', 'retry', 'archive-post')),
       target_post_id text,
       started_at timestamptz NOT NULL,
       finished_at timestamptz,
@@ -50,6 +50,8 @@ const schema: readonly Table[] = [
       ["post_id", "text", false, null],
       ["goal", "text", false, "'save'::text"],
       ["archive_settled", "bool", false, "false"],
+      ["removal_state", "text", false, "'none'::text"],
+      ["deletion_media_version_id", "uuid", true, null],
       ["status", "text", false, null],
       ["last_run_id", "uuid", true, null],
       ["selected_key", "text", true, null],
@@ -66,12 +68,24 @@ const schema: readonly Table[] = [
     constraints: [
       ["post_work_pkey", "PRIMARY KEY (post_id)"],
       [
+        "post_work_removal_state_check",
+        "CHECK (removal_state = ANY (ARRAY['none'::text, 'pending'::text, 'removed'::text]))",
+      ],
+      [
+        "post_work_deletion_binding_check",
+        "CHECK (removal_state = 'none'::text AND deletion_media_version_id IS NULL OR removal_state <> 'none'::text AND deletion_media_version_id IS NOT NULL AND goal = 'archive'::text)",
+      ],
+      [
+        "post_work_deletion_media_version_fkey",
+        "FOREIGN KEY (post_id, deletion_media_version_id) REFERENCES media_versions(post_id, id)",
+      ],
+      [
         "post_work_goal_check",
         "CHECK (goal = ANY (ARRAY['save'::text, 'archive'::text]))",
       ],
       [
         "post_work_archive_settled_check",
-        "CHECK (NOT archive_settled OR goal = 'archive'::text)",
+        "CHECK (NOT archive_settled OR goal = 'archive'::text AND removal_state = 'removed'::text AND status = 'saved'::text AND saved_media_version_id IS NOT NULL AND saved_media_version_id = deletion_media_version_id AND publish_sha256 IS NULL)",
       ],
       [
         "post_work_status_check",
@@ -95,7 +109,13 @@ const schema: readonly Table[] = [
       goal text NOT NULL DEFAULT 'save' CONSTRAINT post_work_goal_check
         CHECK (goal IN ('save', 'archive')),
       archive_settled boolean NOT NULL DEFAULT false,
-      CONSTRAINT post_work_archive_settled_check CHECK (NOT archive_settled OR goal = 'archive'),
+      removal_state text NOT NULL DEFAULT 'none' CONSTRAINT post_work_removal_state_check
+        CHECK (removal_state IN ('none', 'pending', 'removed')),
+      deletion_media_version_id uuid,
+      CONSTRAINT post_work_deletion_binding_check CHECK (
+        (removal_state = 'none' AND deletion_media_version_id IS NULL) OR
+        (removal_state <> 'none' AND deletion_media_version_id IS NOT NULL AND goal = 'archive')),
+      CONSTRAINT post_work_archive_settled_check CHECK (NOT archive_settled OR (goal = 'archive' AND removal_state = 'removed' AND status = 'saved' AND saved_media_version_id IS NOT NULL AND saved_media_version_id = deletion_media_version_id AND publish_sha256 IS NULL)),
       status text NOT NULL CONSTRAINT post_work_status_check
         CHECK (status IN ('pending', 'finalizing', 'saved', 'failed')),
       last_run_id uuid REFERENCES runs(id),
@@ -175,6 +195,13 @@ export async function initializeSchema(sql: SQL): Promise<void> {
         REFERENCES media_versions(post_id, id)
       `);
     }
+    const [deletionConstraint] = await tx<{ exists: boolean }[]>`
+      SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'post_work_deletion_media_version_fkey'
+        AND conrelid = 'public.post_work'::regclass) AS exists
+    `;
+    if (!deletionConstraint.exists)
+      await tx.unsafe(`ALTER TABLE post_work ADD CONSTRAINT post_work_deletion_media_version_fkey
+      FOREIGN KEY (post_id, deletion_media_version_id) REFERENCES media_versions(post_id, id)`);
     await assertExistingTablesMatch(tx, false);
   });
 }

@@ -8,6 +8,7 @@ import {
 } from "../../src/application-runtime";
 import { readDatabaseConfig, readSaveConfig } from "../../src/config";
 import { databaseEnv, testSql, useIsolatedPostgres } from "../helpers/postgres";
+import { seedSettledArchive } from "../helpers/seed-settled-archive";
 
 useIsolatedPostgres();
 const ids = [
@@ -562,7 +563,8 @@ test("P2-01 S2 单页保留 archive、报告未处理并继续新 save", async (
       VALUES (${ids[0]}, 'archive', 'pending', '保留待归档'),
       (${ids[1]}, 'archive', 'saved', '保留已保存但未结清')`;
     await testSql`INSERT INTO post_work (post_id, goal, archive_settled, status)
-      VALUES (${ids[2]}, 'archive', true, 'saved')`;
+      VALUES (${ids[2]}, 'archive', false, 'saved')`;
+    await seedSettledArchive(testSql, ids[2] as string);
     const before = await testSql`SELECT * FROM post_work ORDER BY post_id`;
     const result = await run({
       ...databaseEnv,

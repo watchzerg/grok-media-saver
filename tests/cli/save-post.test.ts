@@ -26,6 +26,7 @@ import {
   RetryableRequestError,
 } from "../../src/grok/adapter";
 import { databaseEnv, testSql, useIsolatedPostgres } from "../helpers/postgres";
+import { seedSettledArchive } from "../helpers/seed-settled-archive";
 
 useIsolatedPostgres();
 
@@ -1332,7 +1333,7 @@ test("P2-01 S1 save 拒绝未结清 archive 并保留发布恢复事实", async 
 
 test("P2-01 S1 已结清 archive 即使文件缺失也直接跳过", async () => {
   const config = await seed();
-  await testSql`UPDATE post_work SET goal = 'archive', archive_settled = true WHERE post_id = ${postId}`;
+  await seedSettledArchive(testSql, postId);
   await rm(config.archiveRoot, { recursive: true });
   const [before] =
     await testSql`SELECT * FROM post_work WHERE post_id = ${postId}`;
@@ -1360,7 +1361,9 @@ test.each([false, true])(
   "P2-01 S2 指定 save 保护 archive，结清=%s",
   async (settled) => {
     const config = await seed();
-    await testSql`UPDATE post_work SET goal = 'archive', archive_settled = ${settled} WHERE post_id = ${postId}`;
+    if (settled) await seedSettledArchive(testSql, postId);
+    else
+      await testSql`UPDATE post_work SET goal = 'archive' WHERE post_id = ${postId}`;
     const [before] =
       await testSql`SELECT * FROM post_work WHERE post_id = ${postId}`;
     await rm(config.archiveRoot, { recursive: true });

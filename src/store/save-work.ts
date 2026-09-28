@@ -4,6 +4,8 @@ export class KnownSaveConflict extends KnownSaveFailure {}
 export type Work = {
   goal: "save" | "archive";
   archiveSettled: boolean;
+  removalState: "none" | "pending" | "removed";
+  deletionMediaVersionId: string | null;
   status: string;
   selectedKey: string | null;
   quality: string | null;
@@ -21,7 +23,8 @@ async function readWork(
   postId: string,
 ): Promise<Work | undefined> {
   const [work] = await session<Work[]>`
-    SELECT goal, archive_settled AS "archiveSettled", status, selected_key AS "selectedKey", quality,
+    SELECT goal, archive_settled AS "archiveSettled", removal_state AS "removalState",
+      deletion_media_version_id::text AS "deletionMediaVersionId", status, selected_key AS "selectedKey", quality,
       mime_type AS "mimeType", expected_bytes::text AS "expectedBytes",
       saved_media_version_id::text AS "savedMediaVersionId",
       publish_temp_name AS "tempName",

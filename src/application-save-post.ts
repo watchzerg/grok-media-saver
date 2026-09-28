@@ -8,7 +8,16 @@ import { archivePost } from "./core/post-archiver";
 import { discardDownloadedTemp, downloadToTemp } from "./files/download";
 import { cleanupPublishedTemp, publishIntent } from "./files/publish-intent";
 import { checkArchiveFile } from "./files/verify";
-import type { PostResponse } from "./grok/adapter";
+import {
+  type PostResponse,
+  parseDeleteResponse,
+  type RawDeleteResponse,
+} from "./grok/adapter";
+import {
+  promoteArchiveWork,
+  recordDeletionIntent,
+  settleArchive,
+} from "./store/archive-work";
 import { connectDatabase, safeDatabaseError } from "./store/database";
 import {
   assertExecutorLock,
@@ -40,14 +49,18 @@ import { verifySchema } from "./store/schema";
 export type SavePostSession = {
   getPostDetail(postId: string, signal: AbortSignal): Promise<PostResponse>;
   downloadMedia?: MediaSource;
+  deletePost?(postId: string, signal: AbortSignal): Promise<RawDeleteResponse>;
   close(): Promise<void>;
   cleanupNotices?: string[];
+  // aggregate close 已为每项资源分别持有 5 秒清理期限。
+  cleanupBounded?: true;
 };
 
 export type SavePostOptions = {
   connect(signal: AbortSignal): Promise<SavePostSession>;
   waitBeforeRetry: (signal: AbortSignal) => Promise<void>;
   signal?: AbortSignal;
+  goal?: "save" | "archive";
   onStage?: (stage: string) => void;
 };
 
@@ -57,6 +70,9 @@ export type SavePostResult = {
   // true: a saved fact for this Post was observed or committed; null: DB write outcome unknown.
   saveRecorded: boolean | null;
   cleanupErrors: string[];
+  remoteObservation?: "not-requested" | "unknown" | "removed";
+  archiveRecorded?: boolean | null;
+  fatalExecution?: boolean;
 };
 
 type ArchivePostInRunResult = SavePostResult & {
@@ -98,6 +114,15 @@ export async function archivePostInRun(
   try {
     const archived = await archivePost({
       postId,
+      goal: options.goal,
+      deletePost: async (id, deleteSignal) => {
+        if (!browser?.deletePost)
+          throw new Error("浏览器会话不支持精确 Post DELETE。");
+        return parseDeleteResponse(
+          id,
+          await browser.deletePost(id, deleteSignal),
+        );
+      },
       files: {
         checkArchiveFile: (path, bytes, sha256) =>
           checkArchiveFile(config.archiveRoot, path, bytes, sha256),
@@ -130,7 +155,11 @@ export async function archivePostInRun(
       store: {
         readWork: async (id) => {
           const work = await readWork(session, id);
-          if (work?.status === "saved" && work.goal === "save") recordSaved();
+          if (
+            work?.status === "saved" &&
+            (work.goal === "save" || options.goal === "archive")
+          )
+            recordSaved();
           return work;
         },
         startWork: (id, run) => write(() => startWork(session, id, run)),
@@ -156,6 +185,12 @@ export async function archivePostInRun(
         failDownload: (id, run, reason) =>
           write(() => failDownload(session, id, run, reason)),
         assertLock: () => assertExecutorLock(session),
+        promoteArchiveWork: () =>
+          write(() => promoteArchiveWork(session, postId, runId)),
+        recordDeletionIntent: (versionId) =>
+          write(() => recordDeletionIntent(session, postId, versionId, runId)),
+        settleArchive: (versionId) =>
+          write(() => settleArchive(session, postId, versionId, runId)),
       },
       getDetail: async (detailSignal) => {
         browser ??= await options.connect(detailSignal);
@@ -182,12 +217,18 @@ export async function archivePostInRun(
       },
       runId,
     });
-    postResult = { ...archived, saveRecorded: saved, settledIntent };
+    postResult = {
+      ...archived,
+      message: safeSaveError(new Error(archived.message), config),
+      saveRecorded: saved,
+      settledIntent,
+    };
     return postResult;
   } finally {
     if (browser) {
       try {
-        await browser.close();
+        if (browser.cleanupBounded) await browser.close();
+        else await boundedCleanup(browser.close(), "浏览器关闭");
       } catch (error) {
         const message = `浏览器清理失败：${safeSaveError(error, config)}`;
         if (postResult) postResult.cleanupErrors.push(message);
@@ -247,7 +288,7 @@ export async function savePost(
     await interruptOrphanedRuns(session);
     runId = crypto.randomUUID();
     runWriteUnknown = true;
-    await startSaveRun(session, runId, postId);
+    await startSaveRun(session, runId, postId, options.goal);
     runWriteUnknown = false;
     await assertExecutorLock(session);
     if (signal.aborted) throw new Error("保存已停止。");
@@ -264,7 +305,7 @@ export async function savePost(
       (message) => result.cleanupErrors.push(message),
     );
     Object.assign(result, postResult);
-    if (runId) {
+    if (runId && !result.fatalExecution) {
       options.onStage?.("核对收尾执行器锁");
       await assertExecutorLock(session);
       options.onStage?.("收尾 Run");
@@ -282,7 +323,7 @@ export async function savePost(
     result.message = runWriteUnknown
       ? `数据库提交结果未知，已停止：${safeSaveError(error, config)}`
       : `保存失败：${safeSaveError(error, config)}`;
-    if (runId && session && !runWriteUnknown) {
+    if (runId && session && !runWriteUnknown && !result.fatalExecution) {
       try {
         await assertExecutorLock(session);
         runWriteUnknown = true;
@@ -296,7 +337,7 @@ export async function savePost(
     if (session) {
       if (lockAcquired) {
         try {
-          await releaseExecutorLock(session);
+          await boundedCleanup(releaseExecutorLock(session), "执行器解锁");
         } catch (error) {
           result.cleanupErrors.push(
             `执行器锁清理失败：${safeSaveError(error, config)}`,
@@ -313,7 +354,7 @@ export async function savePost(
     }
     if (sql) {
       try {
-        await sql.close({ timeout: 5 });
+        await boundedCleanup(sql.close({ timeout: 5 }), "数据库关闭");
       } catch (error) {
         result.cleanupErrors.push(
           `数据库关闭失败：${safeSaveError(error, config)}`,
@@ -323,8 +364,25 @@ export async function savePost(
     reportStopAfterSave();
     if (result.cleanupErrors.length && result.status === "ok") {
       result.status = "failed";
-      result.message = "Post 已保存，但资源清理失败。";
+      result.message =
+        result.archiveRecorded === true
+          ? "归档已结清，但资源清理失败。"
+          : "Post 已保存，但资源清理失败。";
     }
   }
   return result;
+}
+
+async function boundedCleanup<T>(
+  operation: Promise<T>,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label}未能在 5 秒内完成。`)),
+      5_000,
+    );
+  });
+  return Promise.race([operation, deadline]).finally(() => clearTimeout(timer));
 }
