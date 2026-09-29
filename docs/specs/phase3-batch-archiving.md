@@ -257,7 +257,11 @@ status 只读 DB，展示最近 Run 的持久历史摘要与本次查询的当�
 
 ### 当前实现与决策追溯
 
-当前实现已具备单 Post 归档、单页保存、retry、同一 Run 的共享连接／锁／scheduler 与按 Post 请求预算、可空持久摘要。单 Post Application 结果已通过 `newRemovalConfirmed` 区分本次新证据与已有移除事实，独立保留归档记账确定性；真实隔离数据库测试覆盖新证据后的文件冲突、丢锁、提交失回执与事务未提交。当前批量用例尚未提供连续归档；旧 `remoteObservation` 仍可能来自已有移除事实，不能直接充当新进展。当前浏览器 fixture 不提供所需的多轮有状态与跨进程远端事实保留。这些仍是后续新增工作，不表示 `archive saved` 已实现或验收。
+当前 Application 提供 `archiveSaved(config, options)`，复用单 Post archiver、同一 Run 的连接／锁／scheduler 与按 Post 请求预算；CLI `archive saved` 尚未接入。`newRemovalConfirmed` 作为唯一推进来源，旧 `remoteObservation` 不充当新进展。当前 schema 的 Run 命令约束包含 `archive-saved`，普通命令与 `db init` 均拒绝不匹配的旧 schema，不自动迁移或清空数据。
+
+批量结果的 `summary` 在共享五类计数上扩展 `discovered`、`newRemovals`、`rounds`、可空 `lastRoundComplete`、`lastPage`、`endReason` 及可空 `leftovers`。`lastPage` 为 `not-read/nonempty/empty/failed`；`endReason` 为 `completed/leftovers/no-progress/page-failed/stopped/blocked/fault`；遗留快照按 `save/archive` 分列。`summaryRecorded` 保留三值记账合同，Post 结果另列。摘要提交后发生停止或清理故障时，当前返回结果与持久收尾时的历史摘要分别表达，不回写历史。
+
+S1 有状态浏览器 fixture 已分别维护精确目标存在状态和列表可见状态，并保留精确请求与时序记录。批量测试通过真实隔离 DB 和临时文件覆盖多轮、去重、停止、预算、故障优先、遗留快照、提交成功失回执与真实事务拒绝。正式 CLI、跨进程信号／中断重启及跨进程远端事实保留由后续切片提供；正式现场验收未执行，由用户后续人工操作。
 
 | 来源 | 承接内容 |
 | --- | --- |

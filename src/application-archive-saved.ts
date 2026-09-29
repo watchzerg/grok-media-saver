@@ -12,7 +12,7 @@ import {
   emptyRunSummary,
   type RunSummary,
 } from "./core/run-summary";
-import { normalizePostId } from "./grok/adapter";
+import { normalizePostId, RetryableRequestError } from "./grok/adapter";
 import { createRequestScheduler } from "./grok/request-scheduler";
 import { connectDatabase } from "./store/database";
 import {
@@ -121,19 +121,28 @@ export async function archiveSaved(
       throw error;
     }
   };
+  let pageFault = false;
+  let pageRead = false;
   const connected = () => {
-    if (browser && !browser.isConnected())
+    if (browser && !browser.isConnected()) {
+      pageFault = true;
       throw new Error("Chrome Extension 连接已断开。");
+    }
   };
   const connect = async (connectSignal: AbortSignal) => {
     connected();
-    browser ??= await (options.connect
-      ? options.connect(connectSignal, scheduler.requestStarted)
-      : connectBrowserSession(
-          config.savedPageUrl,
-          scheduler.requestStarted,
-          connectSignal,
-        ));
+    try {
+      browser ??= await (options.connect
+        ? options.connect(connectSignal, scheduler.requestStarted)
+        : connectBrowserSession(
+            config.savedPageUrl,
+            scheduler.requestStarted,
+            connectSignal,
+          ));
+    } catch (error) {
+      pageFault = true;
+      throw error;
+    }
     connected();
     const activeBrowser = browser;
     return {
@@ -145,7 +154,32 @@ export async function archiveSaved(
         await assertHeld();
         connected();
         if (requestSignal.aborted) throw new Error("读页已停止。");
-        return activeBrowser.getFirstPage(requestSignal);
+        try {
+          const response = await activeBrowser.getFirstPage(requestSignal);
+          if (response.kind === "page") {
+            const members = response.assets.map((asset) =>
+              normalizePostId(asset.assetId),
+            );
+            if (members.some((id) => !id)) return { kind: "unknown" as const };
+            pageRead = true;
+            summary.lastPage = members.length ? "nonempty" : "empty";
+            for (const id of members) {
+              if (id && !discovered.has(id)) {
+                discovered.add(id);
+                summary.discovered += 1;
+                summary.unprocessed += 1;
+              }
+            }
+          }
+          return response;
+        } catch (error) {
+          if (
+            !(error instanceof RetryableRequestError) &&
+            !requestSignal.aborted
+          )
+            pageFault = true;
+          throw error;
+        }
       },
       close: () => activeBrowser.closePage(),
     };
@@ -179,6 +213,7 @@ export async function archiveSaved(
           connected();
           options.onStage?.("读取 Saved 第一页");
           if (stop()) break;
+          pageRead = false;
           const pageResult = await inspectFirstPage({
             signal,
             secrets: [config.extensionToken, config.password],
@@ -194,13 +229,14 @@ export async function archiveSaved(
           result.cleanupErrors.push(...pageResult.cleanupErrors);
           // The complete decoded page is adopted atomically.
           if (pageResult.status !== "ok") {
-            summary.lastPage = "failed";
+            if (!pageRead) summary.lastPage = "failed";
             summary.endReason =
               pageResult.status === "blocked" ? "blocked" : "page-failed";
             result.status =
               pageResult.status === "blocked" ? "blocked" : "failed";
             result.message = pageResult.message;
-            if (pageResult.cleanupErrors.length) summary.endReason = "fault";
+            if (pageResult.cleanupErrors.length || pageFault || unsafeDatabase)
+              summary.endReason = "fault";
             stop();
             break;
           }
@@ -269,6 +305,9 @@ export async function archiveSaved(
             );
             result.posts.push({ postId: id, goal: "archive", result: post });
             if (!post.unprocessed) handled.add(id);
+            summary.lastRoundComplete = targets.every((member) =>
+              handled.has(member),
+            );
             summary.unconfirmed -= 1;
             summary[classifyPostResult("archive", post)] += 1;
             if (post.newRemovalConfirmed) {
@@ -373,9 +412,12 @@ export async function archiveSaved(
   const cleanup = async (
     label: string,
     operation: () => Promise<void> | void,
+    bounded = true,
   ) => {
     try {
-      await operation();
+      const pending = Promise.resolve().then(operation);
+      if (bounded) await boundedCleanup(pending, label);
+      else await pending;
     } catch (error) {
       result.cleanupErrors.push(
         `${label}失败：${safeSaveError(error, config)}`,
@@ -384,7 +426,11 @@ export async function archiveSaved(
   };
   if (browser) {
     const activeBrowser = browser;
-    await cleanup("浏览器清理", () => activeBrowser.close());
+    await cleanup(
+      "浏览器清理",
+      () => activeBrowser.close(),
+      !activeBrowser.cleanupBounded,
+    );
     if (browser.cleanupNotices.length)
       result.message += ` ${browser.cleanupNotices.join(" ")}`;
   }
@@ -421,4 +467,24 @@ function waitBetweenRounds(signal: AbortSignal): Promise<void> {
     }, 5000);
     signal.addEventListener("abort", abort, { once: true });
   });
+}
+
+async function boundedCleanup<T>(
+  operation: Promise<T>,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label}未能在 5 秒内完成。`)),
+          5000,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
