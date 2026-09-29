@@ -7,7 +7,7 @@
 | 目录 | 职责 | 当前入口 |
 | --- | --- | --- |
 | `agents/` | agent 工作流与详细规则 | [Beads](agents/issue-tracker.md)、[triage labels](agents/triage-labels.md)、[领域文档规则](agents/domain.md)、[测试设计与验收](agents/testing.md) |
-| `specs/` | 已确认、需要在仓库中维护的产品或配置契约 | [产品目标与首版范围](specs/product-goals.md)、[一期可靠保存规格](specs/phase1-saving.md)、[二期单 Post 完整归档规格](specs/phase2-archiving.md) |
+| `specs/` | 已确认、需要在仓库中维护的产品或配置契约 | [产品目标与首版范围](specs/product-goals.md)、[一期可靠保存规格](specs/phase1-saving.md)、[二期单 Post 完整归档规格](specs/phase2-archiving.md)、[三期批量归档规格](specs/phase3-batch-archiving.md) |
 | `research/` | 带版本和观察时点的调研、实验与证据 | [一期验收记录](research/phase1-acceptance.md)、[二期交付覆盖核对](research/phase2-acceptance.md)、[归档核心模型与 HTTP 参考](research/core-archive-model-and-http.md)、[Playwright Extension 媒体下载验证](research/2026-09-25-grok-playwright-extension-demo.md) |
 | `development/` | 实现路线、开发、构建、测试与依赖维护说明 | [一期开发者运行与恢复](development/phase1-runbook.md)、[实现路线图](development/implementation-roadmap.md)、[技术选型与依赖管理](development/technology-stack.md) |
 
@@ -40,6 +40,7 @@
 - `CONTEXT.md` 定义领域词汇，[ARCHITECTURE.md](../ARCHITECTURE.md)定义已接受的模块职责与架构决定，ADR 记录重要决策及其理由。现有内容与后续变更冲突时，先明确冲突并更新权威来源。
 - [一期可靠保存规格](specs/phase1-saving.md)维护一期行为、持久事实、恢复及 Testing Decisions；Beads 决策票保留过程与确认记录，后续实现票引用规格。
 - [二期单 Post 完整归档规格](specs/phase2-archiving.md)维护归档目标、删除资格与判据、持久删除事实、恢复及二期 Testing Decisions；对一期明确扩展的行为以二期为准，未变更的保存契约继续引用一期。`grok-media-saver-we2` 保留决策来源，详细契约由二期规格承接。
+- [三期批量归档规格](specs/phase3-batch-archiving.md)维护 `archive saved` 连续第一页调度、新确认移除、去重与预算、等待和结束条件、批量摘要及三期 Testing Decisions。设计、修改或验证这些行为时必须读取；单 Post 保存、删除与恢复继续引用一二期。`grok-media-saver-ozd` 保留决策来源，规格确认不表示入口已实现。
 - [技术选型与依赖管理](development/technology-stack.md)维护工具和依赖政策；当前版本以配置与 lockfile 为准。根 [justfile](../justfile)及其调用代码定义实际命令行为。
 - [测试设计与验收](agents/testing.md)维护按改动选择验证的规则及共享流程入口；具体规格维护行为覆盖、approved seams 和现场验收要求。
 - `research/` 记录观察和证据；研究建议本身不构成产品合同。
