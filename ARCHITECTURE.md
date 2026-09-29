@@ -67,7 +67,7 @@ Application 提供与检查、保存、重试、状态和核验命令对应的�
 
 二期结果分别表达工作完成、本次远端观察、持久记账确定性及清理错误，远端成功不等于归档已结清。Run 摘要按工作目标区分完成、已结清跳过与未完成情况；`status` 只报告数据库事实，`verify` 优先核验删除依据绑定版本且不改写终态。当前 CLI 和 Application 已实现这些结果区分；完整行为见[二期规格](docs/specs/phase2-archiving.md#application-结果与终端呈现)。
 
-指定 Post、第一页保存和跨 Run `retry` 使用同一个 Post archiver；Run controller 负责选择和顺序安排本次目标。后续连续批量扩展调度，单 Post 删除扩展 Post archiver，不另建保存或恢复路径。
+指定 Post、第一页保存、连续批量归档和跨 Run `retry` 使用同一个 Post archiver；Run controller 负责选择和顺序安排本次目标、连续读页及结束判定。单 Post 保存、删除和恢复统一由 Post archiver 处理。
 
 ### 按用例启动与失败收尾
 

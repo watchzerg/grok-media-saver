@@ -128,6 +128,7 @@ mise exec -- bun src/cli.ts inspect post <Post-ID>
 - [产品目标与首版范围](docs/specs/product-goals.md)：已确认的目标基线、产品原则与完成标准。
 - [架构设计](ARCHITECTURE.md)：已确认的模块职责、运行方式与恢复方向。
 - [一期可靠保存规格](docs/specs/phase1-saving.md)：一期行为、持久事实、恢复及测试边界。
+- [三期批量归档规格](docs/specs/phase3-batch-archiving.md)：连续归档的调度、摘要、完成条件与测试边界。
 - [一期开发者运行与恢复](docs/development/phase1-runbook.md)：安装、配置、命令、核验与中断接续。
 - [一期验收记录](docs/research/phase1-acceptance.md)：正式浏览器与本地边界的证据、限制。
 - [二期交付覆盖核对](docs/research/phase2-acceptance.md)：40 条用户故事、7 组自动化矩阵及现场未验证范围。
