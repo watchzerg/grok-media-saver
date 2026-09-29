@@ -30,13 +30,13 @@ const schema: readonly Table[] = [
       ["runs_pkey", "PRIMARY KEY (id)"],
       [
         "runs_command_check",
-        "CHECK (command = ANY (ARRAY['save-first-page'::text, 'save-post'::text, 'retry'::text, 'archive-post'::text]))",
+        "CHECK (command = ANY (ARRAY['save-first-page'::text, 'save-post'::text, 'retry'::text, 'archive-post'::text, 'archive-saved'::text]))",
       ],
     ],
     create: `CREATE TABLE runs (
       id uuid PRIMARY KEY,
       command text NOT NULL CONSTRAINT runs_command_check
-        CHECK (command IN ('save-first-page', 'save-post', 'retry', 'archive-post')),
+        CHECK (command IN ('save-first-page', 'save-post', 'retry', 'archive-post', 'archive-saved')),
       target_post_id text,
       started_at timestamptz NOT NULL,
       finished_at timestamptz,
