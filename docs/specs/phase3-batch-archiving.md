@@ -86,7 +86,7 @@
 
 新确认事实在取得认可证据时产生，必须能穿过后续本地失败或记账未知返回 Application；它与工作完成、持久记账、清理错误分别表达，不需要另建持久事件日志。
 
-单 Post Application 结果以布尔字段 `newRemovalConfirmed` 表达该事实：仅当本次取得认可的精确 DELETE 或旧 pending 意图的 GET 移除证据、且处理前数据库未确认移除时为 `true`。字段在收到认可响应时立即置位，后续文件失败、丢锁或提交结果未知不得抹去；`remoteObservation` 继续描述本次观察或既有持久事实，`archiveRecorded` 表达归档记账确定性。既有 removed 的本地核验／补救和已结清跳过均为 `false`。批量 Run 可据新字段累计推进事实，不从观察文本或消息推导。
+单 Post Application 结果以布尔字段 `newRemovalConfirmed` 表达该事实：仅当本次取得认可的精确 DELETE 或同目标 GET 移除证据、且处理前数据库未确认移除时为 `true`；同目标 GET 包括旧 pending 意图的恢复核对，以及本次 DELETE 结果未知后的核对。字段在收到认可响应时立即置位，后续文件失败、丢锁或提交结果未知不得抹去；`remoteObservation` 继续描述本次观察或既有持久事实，`archiveRecorded` 表达归档记账确定性。既有 removed 的本地核验／补救和已结清跳过均为 `false`。批量 Run 可据新字段累计推进事实，不从观察文本或消息推导。
 
 ### 结束与故障优先规则
 
