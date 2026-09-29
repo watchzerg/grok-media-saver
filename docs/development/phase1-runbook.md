@@ -4,10 +4,10 @@
 
 ## 准备
 
-1. 在仓库运行 `just install`、`just gate-full`。完整门禁使用隔离 Docker PostgreSQL、临时目录和真实 CLI 子进程；宿主需要能运行 Docker 并取得 `postgres:18-alpine` 镜像。门禁不连接 Chrome 或 Grok。
+1. 按 [README 快速开始](../../README.md#快速开始)准备前置工具并运行 `just install`。当前直接运行源码 CLI，无需构建，也没有常驻服务。自动化检查可运行 `just gate-core`；完整门禁 `just gate-full` 使用隔离 Docker PostgreSQL、临时目录和真实 CLI 子进程，宿主需要能运行 Docker 并取得 `postgres:18-alpine` 镜像。门禁不连接 Chrome 或 Grok，测试容器不用于实际归档。
 2. 为实际归档预先准备**独立于测试容器**的 PostgreSQL 数据库与归档目录。复制 `.env.example` 为 `.env`，填入 `GROK_DB_*`、`GROK_ARCHIVE_DIR`。环境变量优先于 `.env`。数据库密码、Extension token 和含 token 的连接页地址不进入提交、终端记录或验收材料。
 3. 在主 Chrome 的登录配置中保持 Grok 登录，并安装 Playwright Extension。为需要浏览器的命令提供 `PLAYWRIGHT_MCP_EXTENSION_TOKEN`。程序只附着既有 Chrome context，按需建立一次连接并关闭自己的工作页；批量 Run 在各 Post 间复用连接。收尾时关闭能用本次随机标记唯一确认的 `connect.html`，归属不明或旧运行遗留的连接页仍保留并提示人工核对，用户原有标签页由用户管理。
-4. 对实际数据库运行 `mise exec -- bun src/cli.ts db init`。它只初始化当前 schema，不创建数据库；普通命令只读核对 schema，不自动迁移。改动归档根目录后，`verify` 只查新目录。
+4. 对实际数据库运行 `just run db init`。它只初始化当前 schema，不创建数据库；普通命令只读核对 schema，不自动迁移。改动归档根目录后，`verify` 只查新目录。
 
 ## 运行顺序
 
@@ -23,9 +23,9 @@
 | `verify <Post-ID>` | 只读检查当前归档目录中的已保存文件大小与 SHA-256，不改变 DB 或文件。 |
 | `retry` | 新建 Run，固定启动时纯保存目标的 `pending`、`finalizing`、`failed` 及未结清 `archive` 集合；按各自 save/archive 目标逐项接续同一保存或归档路径，每项一轮，已结清不入选；空集合只需 DB，有目标时还需归档目录与 Chrome/Extension。 |
 
-所有命令用 `mise exec -- bun src/cli.ts <命令>` 执行。退出码为 `0` 成功、`1` 执行或核验失败、`2` 参数或配置错误、`130` 首次 Ctrl+C 停止。单 Post、`save first-page` 和 `retry` 的五类摘要按[二期规格](../specs/phase2-archiving.md#单-post-与-retry-的-run-摘要)统一表达；本次已知计数与摘要是否持久记录分别展示。`status` 只读取持久摘要，未收尾或缺失摘要的数量未知。普通单 Post 失败可继续后项；登录/challenge、429、停止、丢锁和基础资源故障会结束本次调度。
+所有命令在仓库根目录用 `just run <命令>` 执行；参数原样传给 CLI，退出码和 Ctrl+C 由前台应用处理。退出码为 `0` 成功、`1` 执行或核验失败、`2` 参数或配置错误、`130` 首次 Ctrl+C 停止。单 Post、`save first-page` 和 `retry` 的五类摘要按[二期规格](../specs/phase2-archiving.md#单-post-与-retry-的-run-摘要)统一表达；本次已知计数与摘要是否持久记录分别展示。`status` 只读取持久摘要，未收尾或缺失摘要的数量未知。普通单 Post 失败可继续后项；登录/challenge、429、停止、丢锁和基础资源故障会结束本次调度。
 
-当前 schema 明确保存 `goal`、`archive_settled`、移除状态和删除依据版本绑定；旧结构不匹配时保留数据并失败，不自动迁移或清空。保存入口拒绝接管未结清 `archive` 工作；单页继续其余成员，整体非零。已结清工作直接跳过，不读取文件或详情。运行命令可复制到 README 的“归档指定 Post”章节；精确目标、核验、未知结果与恢复契约以[二期规格](../specs/phase2-archiving.md#入口与工作目标)为准。待核对意图再次执行 `archive post` 或 `retry` 时先发精确 GET；认可不存在后先持久记录移除，再核验原绑定文件，正确才结清。缺失或冲突保留已移除与未结清，恢复正确文件后再次调用可仅本地核验结清。认可仍存在后先结清旧意图和绑定，确定提交后重新读取详情，符合资格后本 Run 最多一次新 DELETE。本次 DELETE 未知时有限核对；两阶段各最多两次 GET，仅已确认结束的网络错误、超时、408 或 5xx 条件重试一次，沿用共享许可与 30 秒期限。已移除但文件缺失时，仅按原来源补救绑定版本，不重新选择详情或 DELETE。`retry` 按启动时固定的目标集合复用同一接续路径，每项一轮；请求预算按 Post 保留在本 Run 内，所有请求共用调度许可。断连、丢锁、提交不确定、请求停止不确定或清理失败会停止后续项目并保留未开始工作。只保存入口不发 DELETE，`archive` 工作不会被降为 `save`。
+当前 schema 明确保存 `goal`、`archive_settled`、移除状态和删除依据版本绑定；旧结构不匹配时保留数据并失败，不自动迁移或清空。保存入口拒绝接管未结清 `archive` 工作；单页继续其余成员，整体非零。已结清工作直接跳过，不读取文件或详情。常用命令见 [README 人工验证与日常使用](../../README.md#人工验证与日常使用)；精确目标、核验、未知结果与恢复契约以[二期规格](../specs/phase2-archiving.md#入口与工作目标)为准。待核对意图再次执行 `archive post` 或 `retry` 时先发精确 GET；认可不存在后先持久记录移除，再核验原绑定文件，正确才结清。缺失或冲突保留已移除与未结清，恢复正确文件后再次调用可仅本地核验结清。认可仍存在后先结清旧意图和绑定，确定提交后重新读取详情，符合资格后本 Run 最多一次新 DELETE。本次 DELETE 未知时有限核对；两阶段各最多两次 GET，仅已确认结束的网络错误、超时、408 或 5xx 条件重试一次，沿用共享许可与 30 秒期限。已移除但文件缺失时，仅按原来源补救绑定版本，不重新选择详情或 DELETE。`retry` 按启动时固定的目标集合复用同一接续路径，每项一轮；请求预算按 Post 保留在本 Run 内，所有请求共用调度许可。断连、丢锁、提交不确定、请求停止不确定或清理失败会停止后续项目并保留未开始工作。只保存入口不发 DELETE，`archive` 工作不会被降为 `save`。
 
 ## 核验和恢复
 
@@ -41,7 +41,7 @@ Grok 的 PNG 声明、JPEG 内容这一已知错标在完整性核验通过后�
 
 ## 批量归档和显式恢复
 
-运行 `mise exec -- bun src/cli.ts archive saved`。合法非空页计处理轮次；合法空页不计轮，最后一轮是否处理完单列。发现零项和读页失败不证明列表为空。完成须同时具备合法空页、所有 save/archive 工作完成及正常收尾；空页遗留、No Progress、阻挡、故障、记账未知或清理失败退出 `1`。
+运行 `just run archive saved`。合法非空页计处理轮次；合法空页不计轮，最后一轮是否处理完单列。发现零项和读页失败不证明列表为空。完成须同时具备合法空页、所有 save/archive 工作完成及正常收尾；空页遗留、No Progress、阻挡、故障、记账未知或清理失败退出 `1`。
 
 - 已开始未完成：先查 `status`、处理原因，再运行 `retry`；纯 save 目标不会被升级为删除工作。
 - 已发现尚未开始：未预建工作，不保证进入 retry；重新运行 `archive saved` 发现。

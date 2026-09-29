@@ -9,6 +9,10 @@ install:
     mise install --locked bun
     mise exec -- bun ci
 
+# 在前台运行源码 CLI，原样转发参数与退出码。
+run *ARGS:
+    @exec mise exec -- bun src/cli.ts "$@"
+
 typecheck:
     mise exec -- bun run tsc --noEmit
 

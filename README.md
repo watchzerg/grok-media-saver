@@ -1,133 +1,168 @@
 # grok-media-saver
 
-本项目面向个人本地使用，目标是利用现有 Chrome 登录态，将 Grok Saved 列表中的 AI 生成图片和常见小视频可靠归档到本地，并在安全保存后移除对应远端 Post。当前提供只读 Saved 第一页及指定 Post 检查，以及 Saved 第一页和指定 Post 的单响应媒体保存与发布意图接续路径。2026-09-27 的正式主机验收中，CLI 成功连接并读取 40 条第一页；普通图片和一条基础 MP4 均经正式单响应传输、独立文件核验和安全发布，保存命令退出 0。脱敏现场探针分别在媒体 GET 首字节前、读取在途和真实文件写入 Promise 在途时触发停止；停止命令均退出 130，自建页、文件句柄及本次残片完成清理，Post 保持 `pending`，且可以重新连接。写入场景由临时探针在进程内发送 SIGINT；页面级停止依据自建页关闭及后续重连，没有独立的浏览器 `requestfailed` 事件证据。Saved 第一页的 19 条视频详情中未发现可用的既有高清样本，因此真实高清访问与完整传输尚未验收；连接断开与真实清理故障也未在正式浏览器中验收。保存行为以[一期可靠保存规格](docs/specs/phase1-saving.md)为准；当前另提供二期单 Post 正常归档入口，范围与后续恢复切片见下文和[二期规格](docs/specs/phase2-archiving.md)。当前另提供 `archive saved` 连续批量归档，详见[三期规格](docs/specs/phase3-batch-archiving.md)。正式二期和三期 Chrome/Extension/Grok 现场验收未执行，由用户后续人工操作。
+利用现有 Chrome 登录态，将 Grok Saved 列表中的 AI 生成图片和常见小视频可靠保存到本地，并在安全保存后移除对应远端 Post。当前提供只读检查、单 Post／第一页保存、单 Post／连续批量归档、状态查询、文件核验和显式重试。
 
-## 工具链
+当前在仓库根目录直接运行 TypeScript 源码，使用 `just` 作为安装、检查与运行入口，无需构建。应用是前台 CLI，每次执行具体命令时按需连接数据库和浏览器；关闭进程后工作不会继续，没有 Web UI 或常驻服务。
 
-本仓库使用 mise 锁定 Bun，使用 Bun 管理依赖，使用 Biome 检查代码。安装依赖与运行完整本地门禁：
+## 快速开始
+
+### 1. 准备前置环境
+
+| 工具或资源 | 用途与准备方式 |
+| --- | --- |
+| mise、just | 安装与运行入口；按 [mise 安装说明](https://mise.jdx.dev/getting-started.html)和 [just 安装说明](https://just.systems/man/en/packages.html)安装，并确保命令在 PATH 中。Bun 由 `just install` 按仓库锁定版本安装。 |
+| PostgreSQL | 实际归档的持久数据库；准备可访问的服务、独立项目数据库及登录用户。安装入口见 [PostgreSQL 下载页](https://www.postgresql.org/download/)。自动化 DB 测试使用 PostgreSQL 18。 |
+| Chrome、Playwright Extension | 在日常使用的 Chrome profile 中安装 [Playwright Extension](https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm)，打开 Chrome 并登录 Grok。 |
+| 本地归档目录 | 存放媒体；使用可写且支持硬链接的文件系统。默认示例为仓库内的 `./archive`。 |
+| Docker（完整门禁需要） | `just gate-full` 使用隔离的 `postgres:18-alpine` 测试容器；日常 CLI 使用你配置的 PostgreSQL 服务。 |
+
+所有下述 shell 命令均在仓库根目录执行。首次使用若 mise 提示配置未受信任，先检查仓库的 `mise.toml`，再执行 `mise trust`。
+
+### 2. 安装依赖与准备配置
 
 ```sh
 just install
+
+# 仅首次创建；已有 .env 时直接编辑，保留原配置
+cp -n .env.example .env
+```
+
+编辑 `.env`，填写以下配置。配置优先级为进程环境变量 > `.env` > 程序默认值；已有的同名环境变量会覆盖文件配置。
+
+| 配置 | 填写内容 |
+| --- | --- |
+| `GROK_DB_HOST`、`GROK_DB_PORT` | 项目 PostgreSQL 地址与端口。 |
+| `GROK_DB_USER`、`GROK_DB_PASSWORD`、`GROK_DB_NAME` | 项目数据库登录用户、非空密码与数据库名。 |
+| `GROK_ARCHIVE_DIR` | 当前归档根目录；相对路径以仓库根目录为基准，也可填写绝对路径。 |
+| `PLAYWRIGHT_MCP_EXTENSION_TOKEN` | 点击已登录 Grok 的 Chrome profile 中的 Extension 图标，在扩展界面／状态页复制同名 token。它是扩展连接凭据，不是 Grok API key。 |
+
+token 获取方式见 [Playwright Extension 官方说明](https://github.com/microsoft/playwright/blob/v1.63.0/packages/extension/README.md#using-your-unique-authentication-token)。本项目直接使用 Extension 连接，无需另行配置或启动 MCP 服务。`.env` 与默认 `archive/` 已被 Git 忽略；真实密码、token 和含 token 的连接页地址不要提交或写入日志。请求间隔与媒体超时可保留 [`.env.example`](.env.example) 中的默认值。
+
+### 3. 准备并初始化项目数据库
+
+`just install` 不启动 PostgreSQL，也不创建数据库。若尚未准备项目数据库，用管理员连接进入 `psql`（替换管理员名、地址和端口）：
+
+```sh
+psql -h 127.0.0.1 -p 5432 -U <管理员用户> -d postgres
+```
+
+在 **psql 内**执行以下首次创建示例；已有项目用户和数据库时跳过创建，核对登录与权限即可：
+
+```sql
+CREATE ROLE grok_media_saver LOGIN;
+\password grok_media_saver
+CREATE DATABASE grok_media_saver OWNER grok_media_saver;
+\q
+```
+
+`\password` 交互式设置非空密码，随后将相同值填写到 `.env`。示例让项目用户拥有独立数据库，以便创建项目表并正常读写；不需要赋予它超级用户权限。数据库创建及密码命令见 [CREATE DATABASE](https://www.postgresql.org/docs/current/sql-createdatabase.html) 和 [psql](https://www.postgresql.org/docs/current/app-psql.html) 官方说明。
+
+配置完成后：
+
+```sh
+just run db init
+just run status
+```
+
+`db init` 只检查并创建当前项目 schema，不创建数据库、不清空数据、不启动浏览器。当前结构匹配时可以重复运行；旧 schema 不匹配时保留数据并失败，不自动迁移。新数据库的 `status` 应显示尚无 Run、没有未完成 Post。
+
+### 4. 检查 Chrome 连接
+
+```sh
+just run inspect first-page
+```
+
+此命令只读取 Saved 第一页，不下载、不删除，也不创建 Run 或 Post 工作；它只需要 Chrome/Extension 配置。确认返回结果后，再进行下述人工验证。运行期间保持同一 Grok 账号，之后恢复也使用该账号；程序不验证稳定账号身份。
+
+## 人工验证与日常使用
+
+`just run` 后的参数原样传给 CLI。执行 `just run` 可查看用法，缺少命令时退出 `2`。下文的 `<Post-ID>` 均需替换为带连字符的 Post UUID，仅传 ID，不传整条 URL；ID 会去除首尾空白并转成小写。
+
+### 先验证保存和文件核验
+
+选择一个 Post，依次检查、保存并核验：
+
+```sh
+just run inspect post <Post-ID>
+just run save post <Post-ID>
+just run verify <Post-ID>
+just run status
+```
+
+`inspect post` 检查身份、唯一主体媒体和所选画质，不下载文件。图片采用主体下载选择，视频选择已经存在的最高画质，不主动增强，最高已知候选失败时不降级。
+
+`save post` 只保存，不移除远端 Post。每次新建 Run，读取当前详情；当前来源和本地大小、SHA-256 匹配时复用文件，否则下载并完整核验后无覆盖发布。已知的 PNG 声明／JPEG 内容错标按实际 JPEG 保存，其他不一致仍失败。
+
+`verify` 只检查当前归档目录中的文件大小与 SHA-256；有删除依据版本时核验该版本，否则核验当前保存版本。它不连接浏览器，不修复文件或改变数据库状态。正式媒体位于 `<归档目录>/<Post ID>/<SHA-256>.<扩展名>`；完整归档资产包含媒体目录与数据库，备份时应同时保留两者。
+
+仅保存 Saved 第一页可执行：
+
+```sh
+just run save first-page
+```
+
+它只读取当前第一页（最多 40 项），串行保存，处理完即结束，不翻页或删除。普通单 Post 失败继续其他成员；认证／限流阻挡、停止或基础资源故障结束调度。
+
+### 验证归档和连续批量归档
+
+**`archive` 会在安全保存并核验文件后移除远端 Post。** 先对你选定的单 Post 验证，再按需要处理整个 Saved 列表：
+
+```sh
+just run archive post <Post-ID>
+just run verify <Post-ID>
+just run status
+```
+
+单 Post 归档可直接下载保存，也会核验复用已有文件；只有精确版本绑定的删除意图提交成功后才发起 DELETE。运行期间不要外部修改删除依据文件。已结清归档直接跳过；`save` 不会接管未结清的归档工作，也不会降低其目标。
+
+准备好连续归档 Saved 列表时执行：
+
+```sh
+just run archive saved
+```
+
+每轮固定当前第一页，串行归档；同一 Run 的重现 Post 只安排一次。只有新确认移除后才等待固定 5 秒再读第一页；非空轮没有这种进展时以 No Progress 结束，不自动翻页或无限循环。只有读到合法空页、数据库所有 save/archive 工作都完成且正常收尾，才报告整体成功。终端展示本次发现、归档完成、已结清跳过、未确认完成、未处理、新确认移除、轮次与结束原因；未读到的范围未知，不展示全局百分比。
+
+### 停止与恢复
+
+首次 Ctrl+C 停止安排新工作，并完成必要收尾，退出 `130`；在途 DELETE 只在原 30 秒期限内收集结果。第二次 Ctrl+C 强退，可能留下未收尾事实。停止或失败后先查看状态，再处理原因并显式接续：
+
+```sh
+just run status
+just run retry
+```
+
+`retry` 每次新建 Run，处理启动时已存在的未完成工作，保持原 save/archive 目标；保存项不会因此升级为删除工作。空集合只需 DB，不连接浏览器；非空集合还需要归档目录和 Chrome/Extension。
+
+- 已开始的未完成 Post 用 `retry` 接续；批量运行已发现但尚未开始的成员没有预建工作，重新运行 `archive saved` 发现。
+- 删除结果未知时先核对同一远端目标，不盲目重发 DELETE；已移除未结清时仅接续原绑定版本的文件核验或补救。
+- No Progress 中已结清但再次出现的 Post 不会由 `retry` 清除；核对原因后再决定下一步。
+- `status` 只读数据库事实，不检查文件，也不能判断进程是否存活；摘要提交失回执时，先用它读取实际持久结果。
+- 文件冲突不会覆盖；遇到权限、文件缺失或清理错误时保留现场，核对 `status` 和 `verify` 后处理。切换归档目录只检查新目录，不搜索旧目录。
+
+退出码：`0` 成功，`1` 执行／核验失败或未完成，`2` 参数／配置错误，`130` 用户停止。清理失败可使业务已完成的命令仍退出 `1`，不撤销已提交事实。详细失败分类、恢复与现场清单见 [运行与恢复指南](docs/development/phase1-runbook.md#批量归档和显式恢复)。
+
+## 开发检查与验收边界
+
+```sh
+just gate-core
+
+# Docker 可用时运行完整本地门禁
 just gate-full
 ```
 
-`gate-core` 覆盖 Bun 版本、TypeScript、基础 Application 测试及 Biome，不启动外部服务。`gate-full` 另运行真实 CLI 子进程和隔离 Docker PostgreSQL 测试；两者都不连接 Chrome、Extension 或 Grok。`just test` 运行 Bun 测试；`just test core` 运行 Application 与能力 seam 测试。
+`gate-core` 检查 Bun 版本、TypeScript、核心测试和 Biome，不启动外部服务。`gate-full` 再运行真实 CLI 子进程和隔离 Docker PostgreSQL 测试；测试自行准备并清理资源，测试容器不用于日常运行。两者都不连接 Chrome、Extension 或 Grok，也不替代人工验证。
 
-需要浏览器的命令按需建立一次 Playwright Extension 连接；`archive saved`、`save first-page` 和非空 `retry` 在整个 Run 内复用连接，各 Post 的工作页用完即关闭。收尾时先关闭工作页，再关闭能用本次随机标记唯一确认的 `connect.html`，最后断开连接。旧运行遗留或归属无法确认的连接页不会自动关闭。
+其他入口：`just test` 运行全部 Bun 测试，`just test core` 运行核心测试，`just fmt` 格式化，`just --list` 查看可用命令。
 
-## 只读检查 Saved 第一页
-
-在已安装 Playwright Extension 且登录 Grok 的主 Chrome 上，准备 `.env` 中的 `PLAYWRIGHT_MCP_EXTENSION_TOKEN`。配置示例见[`.env.example`](.env.example)；环境变量优先于 `.env`，再使用程序默认值。不得将真实 token 提交或写入日志。
-
-```sh
-mise exec -- bun src/cli.ts inspect first-page
-```
-
-命令只读取一次 Saved 第一页，不展开 Post，不建立 Run 或 Post 工作。正式连接、第一页响应、关闭连接和重新连接已完成现场验收；Saved 页的首请求为 `workspaceKind=WORKSPACE_KIND_IMAGINE_ALL`、`pageSize=40`。此只读命令的取消竞速、真实断连故障及清理失败尚无单独现场证据；普通媒体保存的正式取消结果见[一期验收记录](docs/research/phase1-acceptance.md#正式浏览器与普通媒体)。
-
-## 保存 Saved 第一页
-
-`save first-page` 每次启动新的 Run，只读取一次 Saved 第一页，按返回顺序串行保存其中的 Post。它沿用 `save post` 的详情、媒体传输、文件核验与发布路径；已保存的 Post 仍会重新读取详情并核验本地版本。处理完本页即结束，不请求后续页，也不删除远端 Post。
-
-```sh
-mise exec -- bun src/cli.ts save first-page
-```
-
-命令需要已初始化的项目数据库、归档目录和 Playwright Extension 配置。空页成功并记录零数量；普通单 Post 失败继续后续成员，阻挡、停止或基础资源故障停止安排新成员。终端及已正常收尾的 Run 显示保存完成、归档完成、已结清跳过、未确认完成和未处理数量；第一页最终不可读取时，Run 摘要数量未知。有失败或未处理时退出 `1`，首次 Ctrl+C 退出 `130`。未开始的列表成员不会预建 Post 工作。
-
-2026-09-27 的正式整页运行处理了 40 个成员：31 条保存、9 条因声明为 PNG 但文件头不符而失败、0 条未处理，命令退出 `1`；失败项没有被发布为已保存。代表性 JPEG 和 MP4 的独立 `verify` 通过。现场证据、响应冲突的只读核对及限制见[一期验收记录](docs/research/phase1-acceptance.md#本票正式单页保存)。
-
-## 连续归档 Saved 列表
-
-```sh
-mise exec -- bun src/cli.ts archive saved
-```
-
-命令需要当前 schema 的项目数据库、归档目录和 Chrome/Extension。每轮读取当前 Saved 第一页并固定成员，串行复用单 Post 归档；同一 Run 中等价或重现 Post 只安排一次。只有新确认移除才在可取消的固定 5 秒等待后再读第一页；非空轮没有这种进展时以 No Progress 退出，不自动翻页或循环。
-
-终端分别显示本次去重发现、归档完成、已结清跳过、未确认完成、未处理、新确认移除、轮次、列表观察和结束原因。新确认移除不保证已持久记账；数据库 save/archive 遗留可能与本次结果重叠，不能相加。尚未读到的范围未知，不展示全局百分比。合法空页、全部 DB 工作按各自目标完成且正常收尾才退出 `0`；空页遗留、No Progress、阻挡、故障、摘要未知或清理失败退出 `1`，参数/配置错误退出 `2`，停止退出 `130`。
-
-首次 Ctrl+C 禁止新工作、取消许可及轮间等待；在途 DELETE 仅在原 30 秒期限内收尾。第二次 Ctrl+C 强退。已开始未完成工作查看 `status` 后用 `retry` 保持原目标接续；已发现但未开始的成员未预建工作，须重新运行 `archive saved` 发现。No Progress 中的已结清重现项不会由 retry 清除。删除未知先核对同一目标；已移除未结清仅接续绑定版本文件。摘要提交失回执时先用 `status` 读取实际 DB，不假定回滚。操作及人工清单见[运行与恢复说明](docs/development/phase1-runbook.md#批量归档和显式恢复)。
-
-## 初始化项目数据库
-
-`db init` 只连接 `.env` 中的项目 PostgreSQL 配置，检查并创建当前 schema；它不会创建数据库、清空数据或启动浏览器。结构符合当前 schema 时可重复运行；结构不符时会报错。普通命令的 schema 检查只读，不会自动创建或迁移结构。当前 `post_work` 包含 `goal`、`archive_settled`、`removal_state` 和 `deletion_media_version_id`，同 Post 版本 FK 及结清一致性约束保护删除依据；缺少当前字段或约束的旧 schema 明确失败，保留数据，不自动迁移或清空。
-
-```sh
-mise exec -- bun src/cli.ts db init
-```
-
-首次使用前，在 PostgreSQL 中准备独立的项目数据库，并填写 `GROK_DB_HOST`、`GROK_DB_PORT`、`GROK_DB_USER`、`GROK_DB_PASSWORD` 和 `GROK_DB_NAME`。`db init` 只需要这些 DB 配置，不需要浏览器 token 或归档目录。
-
-## 查看数据库状态
-
-`status` 只读取已初始化的项目数据库，显示最近 Run 摘要和当前未完成 Post。未收尾或缺失摘要的 Run 将历史数量与轮次标为未知，不据此判断进程存活；批量历史摘要、该 Run 收尾时遗留快照与当前 save/archive 遗留分开展示；命令不会连接浏览器或检查归档文件。历史失败不影响状态查询成功退出。
-
-```sh
-mise exec -- bun src/cli.ts status
-```
-
-## 重试未完成 Post
-
-`retry` 通过 PostgreSQL 会话锁避免同一数据库上的并发写入。启动时固定纯保存目标的 `pending`、`finalizing`、`failed` Post，以及尚未结清的 `archive` 工作，按 Post ID 顺序每项处理一次；不依赖当前 Saved 第一页，也不纳入执行期间新增的 Post。纯保存项复用指定 Post 的发布恢复、当前来源核对和图片/视频保存路径。归档项复用 `archive post` 的同一处理路径，接续删除意图核对、已移除绑定版本核验或补救，以及满足资格后的归档；纯保存项不升级目标，已结清归档和已保存的纯保存项不入选。普通单 Post 失败继续，限流、停止、丢锁或基础资源故障停止后续目标。处理非空集合时终端显示当前阶段；终端及正常收尾的 Run 摘要显示保存完成、归档完成、已结清跳过、未确认完成和未处理数量。有失败或未处理时退出 `1`，首次 Ctrl+C 退出 `130`。空集合只需要项目数据库配置，成功收尾且不连接浏览器；非空集合还需要归档目录、Extension token 和保存用配置。Run 写入失去回执时，命令不推断其结果或声称已记账。
-
-```sh
-mise exec -- bun src/cli.ts retry
-```
-
-## 归档指定 Post
-
-`archive post <Post-ID>` 为一个精确 Post 启动新的 Run，先核验保存版本和当前归档目录中的正式文件，再提交绑定该版本的删除意图，最后才请求移除。它复用已安全保存的文件；纯 `save` 命令不会发起 DELETE。已结清 Post 直接跳过。
-
-```sh
-mise exec -- bun src/cli.ts archive post <Post-ID>
-```
-
-命令需要当前 schema 的项目数据库、归档目录和 Playwright Extension 配置。同一账号应贯穿本次处理及之后的显式恢复；程序不验证账号身份。待核对删除意图再次执行 `archive post` 或 `retry` 时先核对同一 Post，不会因未知结果盲目重发；认可仍存在后，本 Run 最多发起一次新的 DELETE。远端已移除而文件缺失或冲突时保留移除事实，恢复的文件必须符合原删除依据版本。
-
-首次 Ctrl+C 禁止新请求，在途 DELETE 只在原 30 秒期限内收集响应；已确认事实仍会记账并以 `130` 退出。期限到达或请求停止状态不确定时保留待核对意图。第二次 Ctrl+C 强制退出。完整契约见[二期规格](docs/specs/phase2-archiving.md)及[运行与恢复指南](docs/development/phase1-runbook.md)。
-
-## 保存指定 Post
-
-`save post <Post-ID>` 每次启动新的 Run；对于纯保存工作，即使该 Post 已是 `saved`，也先核对已有 `finalizing` 意图，再读取当前详情。来源和当前 `GROK_ARCHIVE_DIR` 内已保存文件的大小、SHA-256 均匹配时复用，且不重新下载；文件缺失或来源、适用元数据变化时重新下载。文件访问或权限错误会停止本次下载，保留现有工作事实。需要新文件时通过 Chrome Extension 对所选媒体发起一次完整 GET，将响应流写入当前目录的临时文件。只有 HTTP 200、可信长度、类型及文件头、完整 EOF、实写和重读核验通过，才记录意图并无覆盖发布；Grok 将 JPEG 错标为 PNG 的已知情况按实际 JPEG 类型和 `.jpg` 扩展名保存。冲突保留现场，不覆盖目标文件；再次保存失败保留原成功版本记录，原文件已存在且未受损时也保留原文件。普通暂时失败最多重试一次，重试前重读详情。
-
-```sh
-mise exec -- bun src/cli.ts save post <Post-ID>
-```
-
-此命令需要数据库、归档目录和 Playwright Extension 配置；只作用于当前 schema 与新启动的 Run。媒体首字节、无写入进展及总时长分别默认限制为 30 秒、30 秒、15 分钟，可通过 `.env.example` 中的配置键调整。首次 Ctrl+C 停止新请求，已开始的文件发布及短事务先完成必要收尾；再次运行同一命令会重新核对数据库与文件事实。
-若停止发生在 Run 成功收尾事务开始后，命令仍以 `130` 报告停止，已提交的 `succeeded` Run 与已保存 Post 保持原样。
-详情阻挡或需要下载等结果得出后收到停止时，也以 `130` 报告停止并保留原原因；已提交的 Run 和 Post 事实不会改写。
-
-保存工作明确记录 `save` 目标。只保存入口不会降低既有 `archive` 目标：未结清的归档工作直接报告未处理；单页保存继续其他项并整体退出 `1`。已归档结清的 Post 直接跳过，不访问文件或远端，也不重新打开工作。正式 `archive post <Post ID>` 已提供单 Post 正常归档：统一保存或核验复用后，提交精确版本绑定的删除意图，通过禁止重定向的 DELETE 完整取得 HTTP 200、application/json、空对象响应后结清。未知结果保留待核对意图，不直接重发；再次 `archive post` 或 `retry` 会先对遗留意图进行精确 GET 核对；认可不存在后先记录远端已移除，再核验删除绑定文件，正确才独立结清。缺失或冲突保留已移除与未结清事实，用户恢复正确文件后可再次核验结清；该本地接续不发远端请求。认可仍存在后先短事务结清旧意图和旧绑定，保留成功保存版本；提交确定后重新读取详情、保存或核验，符合资格后本 Run 最多发起一次新 DELETE。旧意图结清失回执或失败立即停止，下次按实际 DB 恢复。本次 DELETE 未知且没有停止、阻挡或基础故障时，会有限核对；确认移除后沿用本次有效文件核验结清，确认仍存在后结清意图并保持未完成，本 Run 不再次 DELETE。恢复与本次未知各最多两次 GET，只在前次请求已确认结束的网络错误、超时、408 或 5xx 后条件重试一次；所有请求沿用共享许可和 30 秒总期限。其他未知保留原意图；已移除但绑定文件缺失时，按原记录来源仅补救绑定版本；内容、类型或长度不符则保留未结清，不重新读取详情选择新版本。`retry` 对混合目标每项只处理一轮；请求预算按 Post 保留在本 Run 内，核对、详情、媒体和 DELETE 共用调度许可。首次 Ctrl+C 禁止新请求并取消许可等待；已发或可能已发 DELETE 继续在原30秒截止时间内收集响应，认可成功且锁与 DB 有效时写入结清事实，仍退出 `130`。到期保留待核对意图，取消要求本身不证明浏览器请求已停止或远端撤销；无法确认停止时报告清理故障并终止工作推进，独立清理继续。第二次 Ctrl+C 强制退出 `130`。完整契约见[二期规格](docs/specs/phase2-archiving.md#入口与工作目标)。
-
-单 Post、单页保存和 `retry` 统一报告五类 Run 摘要：保存完成、归档完成、已结清跳过、未确认完成、未处理。每个本次目标只计入一类；已完成后的清理失败保留完成分类，命令仍退出 `1`。本次已知计数与 Run 摘要提交是否确定分别展示；摘要写入失回执时保留已知 Post 事实，不声称摘要已持久记录。`status` 只展示数据库中的摘要，崩溃遗留的未知计数不补零，也不从当前 Post 工作倒推。停止优先退出 `130`，保留已确认事实及清理错误。完整口径见[二期规格](docs/specs/phase2-archiving.md#单-post-与-retry-的-run-摘要)。
-
-## 核验指定 Post 的本地文件
-
-`verify` 有删除依据版本绑定时核验该版本，否则核验当前保存版本；只在 `GROK_ARCHIVE_DIR` 当前目录下按记录的相对路径核对文件大小与 SHA-256。输出核验版本、当前位置和本次文件结果，并单独展示数据库已记录的归档结清状态。它不连接浏览器，不创建 Run，也不修复或改写持久状态。成功退出码为 `0`，核验异常为 `1`，参数或配置错误为 `2`。
-
-```sh
-mise exec -- bun src/cli.ts verify <Post-ID>
-```
-
-数据库与归档根目录需分别配置；示例见[`.env.example`](.env.example)。切换 `GROK_ARCHIVE_DIR` 后只检查新目录，不搜索旧目录。
-
-## 只读检查指定 Post
-
-传入带连字符的 Post UUID；程序会去除首尾空白并转成小写。输出只包含媒体类型和所选画质，不输出媒体 URL 或详情响应。
-
-```sh
-mise exec -- bun src/cli.ts inspect post <Post-ID>
-```
-
-此命令核对详情返回的 Post 身份和唯一主体媒体，不建立 Run 或 Post 工作，也不下载文件。图片选根 `key`；视频按已存在的 `hd1080Key`、`hdKey`、根 `key` 依次选择，并显示 `1080p`、`720p` 或 `original`。详情身份、结构或最高已知候选无法确认时命令失败；这里只读确认地址字段，不能替代媒体传输完整性验收。
+正式一期现场证据覆盖连接、普通图片、小视频保存和代表性取消清理；真实高清、真实断连与清理故障未完成现场验收。二、三期归档的正式 Chrome/Extension/Grok 现场验收仍待人工执行。历史样本与细节见 [一期验收记录](docs/research/phase1-acceptance.md)和 [二期交付覆盖核对](docs/research/phase2-acceptance.md)。
 
 ## 文档入口
 
 - [产品目标与首版范围](docs/specs/product-goals.md)：已确认的目标基线、产品原则与完成标准。
 - [架构设计](ARCHITECTURE.md)：已确认的模块职责、运行方式与恢复方向。
 - [一期可靠保存规格](docs/specs/phase1-saving.md)：一期行为、持久事实、恢复及测试边界。
+- [二期单 Post 完整归档规格](docs/specs/phase2-archiving.md)：单 Post 归档、删除判据与恢复。
 - [三期批量归档规格](docs/specs/phase3-batch-archiving.md)：连续归档的调度、摘要、完成条件与测试边界。
 - [一期开发者运行与恢复](docs/development/phase1-runbook.md)：安装、配置、命令、核验与中断接续。
 - [一期验收记录](docs/research/phase1-acceptance.md)：正式浏览器与本地边界的证据、限制。
