@@ -130,7 +130,7 @@ test("P3-01 S1 Application 保留真实提交但失回执的新确认并按DB恢
   });
   expect(fake.requests).toEqual([`check:${postId}`]);
   expect(
-    await testSql`
+    await testSql<{ removal_state: string; archive_settled: boolean }[]>`
     SELECT removal_state, archive_settled FROM post_work WHERE post_id = ${postId}
   `,
   ).toEqual([{ removal_state: "removed", archive_settled: false }]);
@@ -182,7 +182,7 @@ test("P3-01 S1 Application 保留真实事务拒绝前已取得的新确认", as
     });
     expect(fake.requests).toEqual([`check:${postId}`]);
     expect(
-      await testSql`
+      await testSql<{ removal_state: string; archive_settled: boolean }[]>`
       SELECT removal_state, archive_settled FROM post_work WHERE post_id = ${postId}
     `,
     ).toEqual([{ removal_state: "pending", archive_settled: false }]);
@@ -206,7 +206,7 @@ test("P3-01 S1 Application 保留真实事务拒绝前已取得的新确认", as
   });
   expect(fake.requests).toEqual([`check:${postId}`, `check:${postId}`]);
   expect(
-    await testSql`
+    await testSql<{ removal_state: string; archive_settled: boolean }[]>`
     SELECT removal_state, archive_settled FROM post_work WHERE post_id = ${postId}
   `,
   ).toEqual([{ removal_state: "removed", archive_settled: true }]);
