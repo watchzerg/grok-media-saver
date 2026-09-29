@@ -991,6 +991,7 @@ export async function archiveSelectedPost(
       message: "Post ID 必须是带连字符的 UUID。",
       saveRecorded: false,
       cleanupErrors: [],
+      newRemovalConfirmed: false,
     };
   const scheduler = createRequestScheduler({
     minSeconds: config.requestIntervalMinSeconds,

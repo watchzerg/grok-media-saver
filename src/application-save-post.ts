@@ -97,6 +97,7 @@ export type SavePostResult = {
   summary?: RunSummary;
   summaryRecorded?: boolean | null;
   remoteObservation?: "not-requested" | "unknown" | "removed" | "present";
+  newRemovalConfirmed: boolean;
   archiveRecorded?: boolean | null;
   fatalExecution?: boolean;
 };
@@ -333,6 +334,7 @@ export async function savePost(
     message: "Post 保存未完成。",
     saveRecorded: false,
     cleanupErrors: [],
+    newRemovalConfirmed: false,
   };
   const reportStopAfterSave = () => {
     if (!signal.aborted || result.status === "cancelled") return;

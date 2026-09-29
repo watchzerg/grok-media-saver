@@ -120,12 +120,14 @@ export async function archivePost({
     unprocessed?: boolean;
     alreadySettled?: boolean;
     remoteObservation?: "not-requested" | "unknown" | "removed" | "present";
+    newRemovalConfirmed: boolean;
     archiveRecorded?: boolean | null;
     fatalExecution?: boolean;
   } = {
     status: "failed",
     message: "Post 保存未完成。",
     cleanupErrors: [],
+    newRemovalConfirmed: false,
   };
   let work = await store.readWork(postId);
   if (work?.archiveSettled) {
@@ -341,12 +343,16 @@ export async function archivePost({
             checkPost(postId, controller.signal, beforeRequest),
             deadline,
           ]);
+          if (observed.kind === "removed") {
+            result.newRemovalConfirmed = true;
+            result.remoteObservation = "removed";
+          } else if (observed.kind === "present") {
+            result.remoteObservation = "present";
+          }
           if (signal.aborted) {
             result.status = "cancelled";
             return;
           }
-          if (observed.kind === "removed" || observed.kind === "present")
-            result.remoteObservation = observed.kind;
           await store.assertLock();
         } catch (error) {
           if (error instanceof RetryableRequestError && !signal.aborted) {
@@ -762,6 +768,7 @@ export async function archivePost({
       return;
     }
     result.remoteObservation = "removed";
+    result.newRemovalConfirmed = true;
     onStage?.("远端已确认移除");
     try {
       await store.assertLock();

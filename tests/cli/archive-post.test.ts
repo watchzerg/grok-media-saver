@@ -359,6 +359,7 @@ test("P2-02 P2-11 S1 显式提升 save 并核验复用同一版本，终态跳�
     saveRecorded: true,
     archiveRecorded: true,
     remoteObservation: "removed",
+    newRemovalConfirmed: true,
     summary: {
       saved: 0,
       archived: 1,
@@ -395,6 +396,7 @@ test("P2-02 P2-11 S1 显式提升 save 并核验复用同一版本，终态跳�
   });
   expect(again.summaryRecorded).toBe(true);
   expect(again.message).toContain("直接跳过");
+  expect(again.newRemovalConfirmed).toBe(false);
   expect(await work()).toEqual(after);
 });
 
@@ -1087,6 +1089,7 @@ test("P2-03 S1 在途首次停止收集认可响应并结清，退出事实仍�
     status: "cancelled",
     remoteObservation: "removed",
     archiveRecorded: true,
+    newRemovalConfirmed: true,
   });
   expect(result.message).toContain("归档已结清");
   expect(requestAborted).toBe(false);
@@ -1401,6 +1404,7 @@ test("P2-04 S1 遗留意图先精确核对，先持久removed再核验绑定文�
     status: "ok",
     remoteObservation: "removed",
     archiveRecorded: true,
+    newRemovalConfirmed: true,
   });
   expect(removalAtVerification).toBe("committed");
   expect(fake.requests).toEqual([`check:${postId}`]);
@@ -1431,6 +1435,7 @@ test("P2-04 S1 认可GET之后丢锁保留远端观察，不改写待核对事�
     status: "failed",
     remoteObservation: "removed",
     archiveRecorded: null,
+    newRemovalConfirmed: true,
     fatalExecution: true,
   });
   expect(await work()).toMatchObject({
@@ -1440,6 +1445,40 @@ test("P2-04 S1 认可GET之后丢锁保留远端观察，不改写待核对事�
   expect(fake.requests).toEqual([`check:${postId}`]);
   expect(result.message).toContain("远端已确认移除");
   expect(result.message).not.toContain("移除结果未知");
+});
+
+test("P3-01 S1 GET返回认可移除后立即停止仍保留新证据", async () => {
+  await seedPendingArchive();
+  const fake = checkOptions();
+  const controller = new AbortController();
+  const result = await archiveSelectedPost(
+    config(),
+    postId,
+    controller.signal,
+    undefined,
+    async () => {
+      const browser = await fake.connect();
+      return {
+        ...browser,
+        checkPost: async (id: string) => {
+          const response = await browser.checkPost(id);
+          controller.abort();
+          return response;
+        },
+      };
+    },
+  );
+  expect(result).toMatchObject({
+    status: "cancelled",
+    remoteObservation: "removed",
+    newRemovalConfirmed: true,
+    archiveRecorded: false,
+  });
+  expect(fake.requests).toEqual([`check:${postId}`]);
+  expect(await work()).toMatchObject({
+    removal_state: "pending",
+    archive_settled: false,
+  });
 });
 
 test("P2-04 S1 认可仍存在GET之后丢锁保留存在说明和原意图", async () => {
@@ -1577,6 +1616,7 @@ test("P2-05 S1 无媒体存在判据先结清旧意图，再核验复用并仅�
     status: "ok",
     remoteObservation: "removed",
     archiveRecorded: true,
+    newRemovalConfirmed: true,
   });
   expect(atDetail).toMatchObject({
     removal_state: "none",
@@ -1612,6 +1652,7 @@ test("P2-04 S1 GET确认移除后绑定文件冲突保留removed未结清，正�
   expect(result).toMatchObject({
     status: "failed",
     remoteObservation: "removed",
+    newRemovalConfirmed: true,
     archiveRecorded: false,
   });
   expect(await work()).toMatchObject({
@@ -2383,6 +2424,7 @@ test("P2-07 S1 已移除缺失文件仅从绑定来源补回原版本", async ()
     status: "ok",
     archiveRecorded: true,
     remoteObservation: "removed",
+    newRemovalConfirmed: false,
   });
   expect(fake.requests).toEqual(["media"]);
   expect(await readFile(path)).toEqual(media);
