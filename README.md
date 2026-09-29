@@ -1,6 +1,6 @@
 # grok-media-saver
 
-本项目面向个人本地使用，目标是利用现有 Chrome 登录态，将 Grok Saved 列表中的 AI 生成图片和常见小视频可靠归档到本地，并在安全保存后移除对应远端 Post。当前提供只读 Saved 第一页及指定 Post 检查，以及 Saved 第一页和指定 Post 的单响应媒体保存与发布意图接续路径。2026-09-27 的正式主机验收中，CLI 成功连接并读取 40 条第一页；普通图片和一条基础 MP4 均经正式单响应传输、独立文件核验和安全发布，保存命令退出 0。脱敏现场探针分别在媒体 GET 首字节前、读取在途和真实文件写入 Promise 在途时触发停止；停止命令均退出 130，自建页、文件句柄及本次残片完成清理，Post 保持 `pending`，且可以重新连接。写入场景由临时探针在进程内发送 SIGINT；页面级停止依据自建页关闭及后续重连，没有独立的浏览器 `requestfailed` 事件证据。Saved 第一页的 19 条视频详情中未发现可用的既有高清样本，因此真实高清访问与完整传输尚未验收；连接断开与真实清理故障也未在正式浏览器中验收。保存行为以[一期可靠保存规格](docs/specs/phase1-saving.md)为准；当前另提供二期单 Post 正常归档入口，范围与后续恢复切片见下文和[二期规格](docs/specs/phase2-archiving.md)。正式二期现场验收未执行，由用户后续人工操作。
+本项目面向个人本地使用，目标是利用现有 Chrome 登录态，将 Grok Saved 列表中的 AI 生成图片和常见小视频可靠归档到本地，并在安全保存后移除对应远端 Post。当前提供只读 Saved 第一页及指定 Post 检查，以及 Saved 第一页和指定 Post 的单响应媒体保存与发布意图接续路径。2026-09-27 的正式主机验收中，CLI 成功连接并读取 40 条第一页；普通图片和一条基础 MP4 均经正式单响应传输、独立文件核验和安全发布，保存命令退出 0。脱敏现场探针分别在媒体 GET 首字节前、读取在途和真实文件写入 Promise 在途时触发停止；停止命令均退出 130，自建页、文件句柄及本次残片完成清理，Post 保持 `pending`，且可以重新连接。写入场景由临时探针在进程内发送 SIGINT；页面级停止依据自建页关闭及后续重连，没有独立的浏览器 `requestfailed` 事件证据。Saved 第一页的 19 条视频详情中未发现可用的既有高清样本，因此真实高清访问与完整传输尚未验收；连接断开与真实清理故障也未在正式浏览器中验收。保存行为以[一期可靠保存规格](docs/specs/phase1-saving.md)为准；当前另提供二期单 Post 正常归档入口，范围与后续恢复切片见下文和[二期规格](docs/specs/phase2-archiving.md)。当前另提供 `archive saved` 连续批量归档，详见[三期规格](docs/specs/phase3-batch-archiving.md)。正式二期和三期 Chrome/Extension/Grok 现场验收未执行，由用户后续人工操作。
 
 ## 工具链
 
@@ -13,7 +13,7 @@ just gate-full
 
 `gate-core` 覆盖 Bun 版本、TypeScript、基础 Application 测试及 Biome，不启动外部服务。`gate-full` 另运行真实 CLI 子进程和隔离 Docker PostgreSQL 测试；两者都不连接 Chrome、Extension 或 Grok。`just test` 运行 Bun 测试；`just test core` 运行 Application 与能力 seam 测试。
 
-需要浏览器的命令按需建立一次 Playwright Extension 连接；`save first-page` 和非空 `retry` 在整个 Run 内复用连接，各 Post 的工作页用完即关闭。收尾时先关闭工作页，再关闭能用本次随机标记唯一确认的 `connect.html`，最后断开连接。旧运行遗留或归属无法确认的连接页不会自动关闭。
+需要浏览器的命令按需建立一次 Playwright Extension 连接；`archive saved`、`save first-page` 和非空 `retry` 在整个 Run 内复用连接，各 Post 的工作页用完即关闭。收尾时先关闭工作页，再关闭能用本次随机标记唯一确认的 `connect.html`，最后断开连接。旧运行遗留或归属无法确认的连接页不会自动关闭。
 
 ## 只读检查 Saved 第一页
 
@@ -37,6 +37,18 @@ mise exec -- bun src/cli.ts save first-page
 
 2026-09-27 的正式整页运行处理了 40 个成员：31 条保存、9 条因声明为 PNG 但文件头不符而失败、0 条未处理，命令退出 `1`；失败项没有被发布为已保存。代表性 JPEG 和 MP4 的独立 `verify` 通过。现场证据、响应冲突的只读核对及限制见[一期验收记录](docs/research/phase1-acceptance.md#本票正式单页保存)。
 
+## 连续归档 Saved 列表
+
+```sh
+mise exec -- bun src/cli.ts archive saved
+```
+
+命令需要当前 schema 的项目数据库、归档目录和 Chrome/Extension。每轮读取当前 Saved 第一页并固定成员，串行复用单 Post 归档；同一 Run 中等价或重现 Post 只安排一次。只有新确认移除才在可取消的固定 5 秒等待后再读第一页；非空轮没有这种进展时以 No Progress 退出，不自动翻页或循环。
+
+终端分别显示本次去重发现、归档完成、已结清跳过、未确认完成、未处理、新确认移除、轮次、列表观察和结束原因。新确认移除不保证已持久记账；数据库 save/archive 遗留可能与本次结果重叠，不能相加。尚未读到的范围未知，不展示全局百分比。合法空页、全部 DB 工作按各自目标完成且正常收尾才退出 `0`；空页遗留、No Progress、阻挡、故障、摘要未知或清理失败退出 `1`，参数/配置错误退出 `2`，停止退出 `130`。
+
+首次 Ctrl+C 禁止新工作、取消许可及轮间等待；在途 DELETE 仅在原 30 秒期限内收尾。第二次 Ctrl+C 强退。已开始未完成工作查看 `status` 后用 `retry` 保持原目标接续；已发现但未开始的成员未预建工作，须重新运行 `archive saved` 发现。No Progress 中的已结清重现项不会由 retry 清除。删除未知先核对同一目标；已移除未结清仅接续绑定版本文件。摘要提交失回执时先用 `status` 读取实际 DB，不假定回滚。操作及人工清单见[运行与恢复说明](docs/development/phase1-runbook.md#批量归档和显式恢复)。
+
 ## 初始化项目数据库
 
 `db init` 只连接 `.env` 中的项目 PostgreSQL 配置，检查并创建当前 schema；它不会创建数据库、清空数据或启动浏览器。结构符合当前 schema 时可重复运行；结构不符时会报错。普通命令的 schema 检查只读，不会自动创建或迁移结构。当前 `post_work` 包含 `goal`、`archive_settled`、`removal_state` 和 `deletion_media_version_id`，同 Post 版本 FK 及结清一致性约束保护删除依据；缺少当前字段或约束的旧 schema 明确失败，保留数据，不自动迁移或清空。
@@ -49,7 +61,7 @@ mise exec -- bun src/cli.ts db init
 
 ## 查看数据库状态
 
-`status` 只读取已初始化的项目数据库，显示最近 Run 摘要和当前未完成 Post。未正常收尾的 Run 会将数量标为未知，并提示它可能仍在运行或已中断；命令不会连接浏览器或检查归档文件。历史失败不影响状态查询成功退出。
+`status` 只读取已初始化的项目数据库，显示最近 Run 摘要和当前未完成 Post。未收尾或缺失摘要的 Run 将历史数量与轮次标为未知，不据此判断进程存活；批量历史摘要、该 Run 收尾时遗留快照与当前 save/archive 遗留分开展示；命令不会连接浏览器或检查归档文件。历史失败不影响状态查询成功退出。
 
 ```sh
 mise exec -- bun src/cli.ts status
