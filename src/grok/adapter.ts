@@ -20,6 +20,29 @@ export type PostMediaSelection = {
   expectedBytes?: number;
 };
 
+// 部分原始 MP4 的 sizeBytes 实际记录了含前缀的 Base64 Data URL 长度。
+// 仅解释详情元数据；响应完整性和绑定版本仍须按真实字节数核验。
+export function matchesMediaDetailSize(
+  selection: PostMediaSelection,
+  byteCount: number,
+): boolean {
+  if (
+    selection.expectedBytes === undefined ||
+    selection.expectedBytes === byteCount
+  )
+    return true;
+  if (
+    selection.quality !== "original" ||
+    selection.mimeType.toLowerCase() !== "video/mp4"
+  )
+    return false;
+  const encodedLength = 4 * Math.ceil(byteCount / 3) + 22;
+  return (
+    Number.isSafeInteger(encodedLength) &&
+    selection.expectedBytes === encodedLength
+  );
+}
+
 export type PostResponse =
   | { kind: "post"; selection: PostMediaSelection }
   | Exclude<PageResponse, { kind: "page" }>;

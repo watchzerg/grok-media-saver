@@ -2,6 +2,7 @@ import type { PostMediaSelection, PostResponse } from "../grok/adapter";
 import {
   type CheckResponse,
   type DeleteResponse,
+  matchesMediaDetailSize,
   RetryableRequestError,
   UnconfirmedStopError,
 } from "../grok/adapter";
@@ -241,8 +242,7 @@ export async function archivePost({
       onStage?.("核验已保存文件");
       const check =
         version &&
-        (detail.selection.expectedBytes === undefined ||
-          Number(version.byteCount) === detail.selection.expectedBytes)
+        matchesMediaDetailSize(detail.selection, Number(version.byteCount))
           ? await files.checkArchiveFile(
               version.relativePath,
               Number(version.byteCount),

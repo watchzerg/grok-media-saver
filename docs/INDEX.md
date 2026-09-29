@@ -27,6 +27,7 @@
 - [Post 单媒体、衍生切换与清晰度现场观察](research/post-identity-quality.md)
 - [媒体传输与停止研究（含已取消的大视频历史建议）](research/phase1-media-transfer.md)
 - [所选媒体总长度与内容摘要的现场证据](research/media-completeness-evidence.md)
+- [原始 MP4 详情大小为 Data URL 长度的诊断](research/mp4-data-url-size.md)
 - [PostgreSQL 事务与执行器互斥](research/phase1-postgres-boundaries.md)
 - [文件无覆盖发布与恢复](research/phase1-file-publication.md)
 

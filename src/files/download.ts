@@ -8,7 +8,7 @@ import {
   RetryableMediaError,
 } from "../core/file-capabilities";
 import type { PostMediaSelection } from "../grok/adapter";
-import { UnconfirmedStopError } from "../grok/adapter";
+import { matchesMediaDetailSize, UnconfirmedStopError } from "../grok/adapter";
 import { checkArchiveFile } from "./verify";
 
 const formats: Record<
@@ -171,11 +171,17 @@ export async function downloadToTemp(
         expected = Number(headers.contentLength);
         if (!Number.isSafeInteger(expected))
           throw new RetryableMediaError("媒体响应长度无效。");
+        if (!matchesMediaDetailSize(selection, expected))
+          throw new RetryableMediaError(
+            `媒体响应长度与详情元数据冲突：详情 ${selection.expectedBytes} 字节，响应 ${expected} 字节。`,
+          );
         if (
           selection.expectedBytes !== undefined &&
           expected !== selection.expectedBytes
         )
-          throw new RetryableMediaError("媒体响应长度与详情元数据冲突。");
+          onStage?.(
+            `Grok 原始 MP4 详情大小为 Data URL 长度（${selection.expectedBytes} 字符）；按响应 ${expected} 字节核验完整传输。`,
+          );
         onStage?.(
           `媒体响应：HTTP 200，${safeType(type)}，Content-Length ${expected} 字节`,
         );

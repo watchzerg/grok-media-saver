@@ -186,6 +186,131 @@ test("S1 saves a PNG-declared JPEG as JPEG and reuses that version", async () =>
   expect(downloads).toBe(1);
 });
 
+test.each([
+  [19, 50],
+  [20, 50],
+  [21, 50],
+  [1209632, 1612866],
+])(
+  "S1 原始 MP4 的 Data URL 长度元数据允许保存并复用真实字节版本（%i 字节）",
+  async (byteCount, detailSize) => {
+    const config = await setup();
+    // 覆盖 Base64 三种填充长度；大样本长度来自现场，内容仅为合成 fixture。
+    const media = Buffer.alloc(byteCount);
+    mp4.copy(media);
+    let downloads = 0;
+    const stages: string[] = [];
+    const connect = async () => ({
+      getPostDetail: async () =>
+        parsePostDetailResponse(postId, {
+          status: 200,
+          contentType: "application/json",
+          finalPath: `/rest/assets/${postId}`,
+          body: {
+            assetId: postId,
+            key: "https://assets.grok.com/video.mp4",
+            mimeType: "video/mp4",
+            sizeBytes: detailSize,
+          },
+        }),
+      downloadMedia: async (
+        _selection: unknown,
+        response: (headers: {
+          status: number;
+          contentType: string;
+          contentLength: string;
+          contentEncoding: null;
+        }) => Promise<void>,
+        chunk: (bytes: Uint8Array) => Promise<void>,
+      ) => {
+        downloads++;
+        await response({
+          status: 200,
+          contentType: "video/mp4",
+          contentLength: String(media.length),
+          contentEncoding: null,
+        });
+        await chunk(media);
+      },
+      close: async () => {},
+    });
+    const save = () =>
+      saveSelectedPost(
+        config,
+        postId,
+        new AbortController().signal,
+        (stage) => stages.push(stage),
+        connect,
+      );
+    const first = await save();
+    expect(first.status, first.message).toBe("ok");
+    const [version] = await testSql<
+      { byte_count: string; relative_path: string; expected_bytes: string }[]
+    >`
+    SELECT v.byte_count::text, v.relative_path, w.expected_bytes::text
+    FROM post_work w JOIN media_versions v ON v.id = w.saved_media_version_id WHERE w.post_id = ${postId}`;
+    expect(version.byte_count).toBe(String(byteCount));
+    expect(version.expected_bytes).toBe(String(detailSize));
+    expect(
+      await readFile(join(config.archiveRoot, version.relative_path)),
+    ).toEqual(media);
+    const second = await save();
+    expect(second.status, second.message).toBe("ok");
+    expect(second.message).toContain("复用");
+    expect(downloads).toBe(1);
+    expect(stages.some((stage) => stage.includes("Data URL"))).toBe(true);
+  },
+);
+
+test.each([
+  ["不精确匹配", "video/mp4", "original", 51, "19", null, false],
+  ["图片不能使用例外", "image/png", "image", 50, "19", null, false],
+  ["高清不能使用例外", "video/mp4", "720p", 50, "19", null, false],
+  ["截断正文", "video/mp4", "original", 50, "19", null, true],
+  ["缺少响应长度", "video/mp4", "original", 50, null, null, false],
+  ["压缩响应", "video/mp4", "original", 50, "19", "gzip", false],
+] as const)(
+  "S1 Data URL 大小兼容仍拒绝%s且不发布文件",
+  async (_label, mimeType, quality, expectedBytes, contentLength, contentEncoding, truncate) => {
+    const config = await setup();
+    const result = await saveSelectedPost(
+      config,
+      postId,
+      new AbortController().signal,
+      undefined,
+      async () => ({
+        getPostDetail: async () => ({
+          kind: "post",
+          selection: {
+            assetId: postId,
+            key: "https://assets.grok.com/media",
+            mimeType,
+            quality,
+            expectedBytes,
+          },
+        }),
+        downloadMedia: async (_selection, response, chunk) => {
+          await response({
+            status: 200,
+            contentType: mimeType,
+            contentLength,
+            contentEncoding,
+          });
+          await chunk(mp4.subarray(0, truncate ? 18 : 19));
+        },
+        close: async () => {},
+      }),
+    );
+    expect(result.status).toBe("failed");
+    const [state] = await testSql<{ status: string; versions: number }[]>`
+    SELECT status, (SELECT count(*)::integer FROM media_versions) AS versions FROM post_work WHERE post_id = ${postId}`;
+    expect(state).toEqual({ status: "failed", versions: 0 });
+    if (_label === "不精确匹配") {
+      expect(result.message).toContain("详情 51 字节，响应 19 字节");
+    }
+  },
+);
+
 test("S1 explicit save rereads a saved Post and reuses a verified version", async () => {
   const config = await setup();
   let details = 0;
