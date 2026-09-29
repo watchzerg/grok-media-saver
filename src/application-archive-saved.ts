@@ -276,6 +276,10 @@ export async function archiveSaved(
             }
             await assertHeld();
             connected();
+            if (stop()) {
+              roundFinished = false;
+              break;
+            }
             if (scheduled.has(id)) continue;
             scheduled.add(id);
             summary.unprocessed -= 1;

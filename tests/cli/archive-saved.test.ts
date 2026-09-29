@@ -793,3 +793,57 @@ test("S1 浏览器逐资源清理自带期限时不被外层五秒总期限截�
   expect(result.cleanupErrors).toHaveLength(0);
   expect(fake.closes).toBe(1);
 }, 10000);
+
+for (const existingSave of [false, true]) {
+  test(`S1 成员锁核对期间停止保持未处理且${existingSave ? "不提升纯 save 目标" : "不创建归档工作"}`, async () => {
+    const { config, fake } = await setup([page(ids[0])]);
+    if (existingSave) {
+      const saved = await saveSelectedPost(
+        config,
+        ids[0],
+        new AbortController().signal,
+        undefined,
+        (signal) => fake.connect(signal, () => {}),
+      );
+      expect(saved.status).toBe("ok");
+    }
+    const before = await testSql`SELECT * FROM post_work ORDER BY post_id`;
+    const { result, requests } = await applicationProcess(
+      config,
+      ["tests/helpers/stop-batch-member-lock.ts"],
+      {
+        GMS_TEST_BATCH_IDS: JSON.stringify([ids[0]]),
+        GMS_TEST_BATCH_STOP_MEMBER_LOCK: "1",
+      },
+    );
+    expect(result.status).toBe("cancelled");
+    expect(await testSql`SELECT * FROM post_work ORDER BY post_id`).toEqual(
+      before,
+    );
+    expect(result.summary).toMatchObject({
+      discovered: 1,
+      archived: 0,
+      skipped: 0,
+      unconfirmed: 0,
+      unprocessed: 1,
+      newRemovals: 0,
+      rounds: 1,
+      lastRoundComplete: false,
+      lastPage: "nonempty",
+      endReason: "stopped",
+      leftovers: { save: 0, archive: 0 },
+    });
+    expect(result.posts).toHaveLength(0);
+    expect(requests.map((request) => request.kind)).toEqual([
+      "page",
+      "close-page",
+    ]);
+    const [run] =
+      await testSql`SELECT outcome, summary FROM runs WHERE command='archive-saved'`;
+    expect(run).toMatchObject({ outcome: "stopped", summary: result.summary });
+    expect(result.summaryRecorded).toBe(true);
+    const [locks] =
+      await testSql`SELECT count(*)::integer AS count FROM pg_locks WHERE locktype='advisory' AND classid=1297043787::oid AND objid=1::oid`;
+    expect(locks?.count).toBe(0);
+  }, 20000);
+}

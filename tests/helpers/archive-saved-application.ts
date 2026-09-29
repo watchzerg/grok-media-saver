@@ -14,6 +14,12 @@ const fake = statefulArchiveBrowser([
   { kind: "page", assets: [], hasNextPage: false },
 ]);
 const controller = new AbortController();
+if (process.env.GMS_TEST_BATCH_STOP_MEMBER_LOCK === "1") {
+  process.once("gms-test-member-lock", () => controller.abort());
+  fake.onRequest = (kind) => {
+    if (kind === "page") process.emit("gms-test-page-read");
+  };
+}
 // Direct Application observation; the process only isolates existing fault preloads.
 const result = await archiveSaved(readSaveConfig(process.env), {
   connect: fake.connect,
