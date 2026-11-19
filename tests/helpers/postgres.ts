@@ -7,6 +7,8 @@ const username = "postgres";
 let containerId: string | undefined;
 const host = "127.0.0.1";
 let port: number;
+// 容器启动与就绪等待可能超过 bun 默认 5 秒 hook 超时；须高于下方 30 秒就绪期限。
+const hookTimeoutMs = 45_000;
 
 export let testSql: SQL;
 export let databaseEnv: Record<string, string>;
@@ -63,7 +65,7 @@ export function useIsolatedPostgres() {
       GROK_DB_PASSWORD: password,
       GROK_DB_NAME: database,
     };
-  });
+  }, hookTimeoutMs);
 
   afterAll(async () => {
     try {
@@ -71,7 +73,7 @@ export function useIsolatedPostgres() {
     } finally {
       if (containerId) await runDocker(["stop", containerId]);
     }
-  });
+  }, hookTimeoutMs);
 }
 
 async function runDocker(args: string[]) {

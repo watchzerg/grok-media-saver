@@ -61,6 +61,9 @@ export async function checkArchiveFile(
   } catch (error) {
     if (errorCode(error) === "ENOENT") return { status: "missing" };
     if (errorCode(error) === "ELOOP") return { status: "symlink" };
+    // macOS 的 realpath 已因权限失败；Linux 的 realpath 不打开文件，权限错误到此才出现。
+    if (errorCode(error) === "EACCES" || errorCode(error) === "EPERM")
+      return { status: "failed", reason: "无法访问归档文件。" };
     return { status: "failed", reason: "无法读取归档文件。" };
   }
   let result: ArchiveCheck;
