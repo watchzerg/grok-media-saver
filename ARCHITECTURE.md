@@ -100,7 +100,7 @@ Run controller 决定读页等 Run 级操作是否重试；Post archiver 决定�
 
 Grok 协议变化集中在 Grok adapter，Playwright 连接变化集中在 Browser session。Core 不依赖原始 JSON 字段或 Playwright 对象。对象身份、下载授权或删除语义改变时，仍可能需要调整核心规则。
 
-连接沿用已验证的 Playwright Extension 方向，具体内部工具入口不是固定契约；依赖版本按仓库工具链规则声明和锁定，升级时验证连接、请求与断开行为。不自行开发浏览器扩展或引入额外 MCP 服务。
+连接沿用已验证的 Playwright Extension 方向，具体内部工具入口不是固定契约；依赖版本按仓库工具链规则声明和锁定，升级时验证连接、请求与断开行为。不自行开发浏览器扩展或引入额外 MCP 服务。`playwright-core` 与 Playwright Extension 是产品运行时依赖，用于连接用户的 Chrome，不是测试或验收工具；“测试与验收不用 Playwright MCP”的规则不约束这里，自动化测试仍只用替身。
 
 ## API 节奏与媒体传输
 
