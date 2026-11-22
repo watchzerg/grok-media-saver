@@ -2,6 +2,8 @@
 
 观察日期：2026-09-27。范围为当前一期源码、当前 schema、新启动的 Run，以及主 Chrome 已登录 Grok 后的 Playwright Extension relay。详细行为以[一期可靠保存规格](../specs/phase1-saving.md#testing-decisions)为准；本记录区分自动化、本机正式路径和未覆盖场景。现场仅记录媒体类别、数量与去身份化结果，不存 Post ID、媒体 URL、完整响应、Cookie、数据库密码或 Extension token。
 
+2026-11-22 测试精简后，本文引用的许多测试用例已删除，本文仅保留当时的核对记录；当前回归范围见[测试分层与保留范围](../development/test-layers.md)。
+
 ## 自动化与前序票证据核对
 
 当前无筛选 `just gate-full` 依次完成 Bun 版本检查、TypeScript、36 项 core 测试、Biome CI，以及 150 项 CLI 测试。CLI 套件使用隔离 Docker PostgreSQL、临时文件和真实子进程；零匹配会失败。`gate-full` 不连接 Chrome、Extension 或 Grok。前序 13 张实施票的最终报告均为 `DONE / passed`，最终审查 gate 为 `PASS`，其 HEAD 均在本票代码基线 `334b6ad` 的祖先链中。`.3` 使用最终 `report-resume.json`，`.13` 使用最终 `report-extended.json`；未将它们较早的报告误作终态。

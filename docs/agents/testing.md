@@ -11,7 +11,7 @@
 
 ## 当前命令与验收来源
 
-根 [justfile](../../justfile) 及其调用代码定义实际执行范围。`just test` 或 `just test all` 运行全部 Bun 测试，`just test core` 选择核心测试；支持路径和 `-t <name>` 筛选。`gate-core` 包含 Bun 版本检查、TypeScript、核心测试与 Biome CI；`gate-full` 再运行 CLI 边界测试，需要 Docker 与 `postgres:18-alpine` 镜像。
+根 [justfile](../../justfile) 及其调用代码定义实际执行范围。`just test` 或 `just test all` 运行全部 Bun 测试，`just test core` 选择核心测试；支持路径和 `-t <name>` 筛选。`gate-core` 包含 Bun 版本检查、TypeScript、核心测试与 Biome CI；`gate-full` 再运行 CLI 边界测试，需要 Docker 与 `postgres:18-alpine` 镜像。各层目录、资源边界和当前保留范围见[测试分层与保留范围](../development/test-layers.md)。
 
 设计、修改或核对行为测试与验收时，必须通过[文档索引](../INDEX.md#权威来源与适用范围)定位当前任务适用的现行规格，并读取其中的测试决策、approved seams、行为覆盖和现场验收要求；有 assigned ticket 时同时核对其 acceptance 与 Test plan。本文维护通用验证流程，具体行为与验收要求由对应规格维护。
 

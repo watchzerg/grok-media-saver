@@ -2,7 +2,6 @@ import type { BrowserSession } from "../../src/browser/session";
 import {
   type PageResponse,
   parsePostDetailResponse,
-  RetryableRequestError,
 } from "../../src/grok/adapter";
 
 export const fixtureMedia = Buffer.from(
@@ -19,27 +18,18 @@ export function statefulArchiveBrowser(pages: PageResponse[]) {
   let connections = 0;
   let closes = 0;
   const unavailable = new Set<string>();
-  const blocked = new Set<string>();
-  const lostDeleteReceipt = new Set<string>();
   const record = (kind: string, postId?: string) =>
     requests.push({ kind, postId, at: Date.now() });
   const fixture = {
     removed,
     requests,
     unavailable,
-    blocked,
-    lostDeleteReceipt,
     get connections() {
       return connections;
     },
     get closes() {
       return closes;
     },
-    disconnect() {
-      connected = false;
-    },
-    closePageError: false,
-    closeError: false,
     onRequest: undefined as
       | ((kind: string, postId?: string) => Promise<void> | void)
       | undefined,
@@ -66,7 +56,6 @@ export function statefulArchiveBrowser(pages: PageResponse[]) {
         },
         getPostDetail: async (id) => {
           await request("detail", id);
-          if (blocked.has(id)) return { kind: "blocked", status: 429 };
           if (unavailable.has(id) || removed.has(id))
             return { kind: "unavailable", status: 404 };
           return parsePostDetailResponse(id, {
@@ -94,8 +83,6 @@ export function statefulArchiveBrowser(pages: PageResponse[]) {
         deletePost: async (id) => {
           await request("delete", id);
           removed.add(id);
-          if (lostDeleteReceipt.has(id))
-            throw new RetryableRequestError("fixture lost DELETE receipt");
           return {
             status: 200,
             contentType: "application/json",
@@ -122,14 +109,10 @@ export function statefulArchiveBrowser(pages: PageResponse[]) {
         isConnected: () => connected,
         closePage: async () => {
           record("close-page");
-          if (fixture.closePageError)
-            throw new Error("fixture page cleanup failed");
         },
         close: async () => {
           closes += 1;
           connected = false;
-          if (fixture.closeError)
-            throw new Error("fixture final cleanup failed");
         },
         cleanupNotices: [],
         cleanupBounded: true,

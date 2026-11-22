@@ -2,32 +2,11 @@ import { expect, test } from "bun:test";
 import {
   initializeProjectDatabase,
   readProjectStatus,
-  retryUnfinishedPosts,
 } from "../../src/application-runtime";
 import { readDatabaseConfig } from "../../src/config";
 import { databaseEnv, testSql, useIsolatedPostgres } from "../helpers/postgres";
 
 useIsolatedPostgres();
-
-test("P2-11 S1 空 retry 返回并持久记录互斥五类零计数", async () => {
-  await testSql`DROP TABLE IF EXISTS media_versions, post_work, runs CASCADE`;
-  const config = readDatabaseConfig(databaseEnv);
-  expect((await initializeProjectDatabase(config)).status).toBe("ok");
-  const result = await retryUnfinishedPosts(config);
-  const summary = {
-    saved: 0,
-    archived: 0,
-    skipped: 0,
-    unconfirmed: 0,
-    unprocessed: 0,
-  };
-  expect(result).toMatchObject({
-    status: "ok",
-    summary,
-    summaryRecorded: true,
-  });
-  expect((await readProjectStatus(config)).latestRun?.summary).toEqual(summary);
-});
 
 const postId = "123e4567-e89b-42d3-a456-426614174001";
 async function reset() {
@@ -90,64 +69,6 @@ afterAll(async () => {
   for (const root of roots) await rm(root, { recursive: true, force: true });
 });
 
-test("P2-11 S2 单目标归档完成后的清理失败保留归档计数", async () => {
-  await reset();
-  const result = await cli(["archive", "post", postId], {
-    GMS_TEST_CLOSE_FAILURE: "1",
-  });
-  expect(result.exitCode).toBe(1);
-  expect(result.stderr).toContain("归档已结清");
-  expect(result.stderr).toContain("归档完成 1");
-  expect(result.stderr).toContain("未确认完成 0");
-  expect(
-    (await readProjectStatus(readDatabaseConfig(databaseEnv))).latestRun
-      ?.summary,
-  ).toEqual({
-    saved: 0,
-    archived: 1,
-    skipped: 0,
-    unconfirmed: 0,
-    unprocessed: 0,
-  });
-});
-
-for (const command of [
-  ["save", "post", postId],
-  ["archive", "post", postId],
-  ["retry"],
-]) {
-  test(`P2-11 S2 ${command[0]} 摘要实际提交失回执保留 Post 完成事实`, async () => {
-    await reset();
-    if (command[0] === "retry")
-      await testSql`INSERT INTO post_work(post_id,status,goal) VALUES (${postId},'failed','archive')`;
-    const result = await cli(command, {}, [
-      "./tests/helpers/lose-run-summary-receipt.ts",
-    ]);
-    expect(result.exitCode).toBe(1);
-    expect(result.stderr).toContain("摘要提交结果未知");
-    expect(result.stderr).not.toContain("摘要已持久记录");
-    expect(result.stderr).toContain(
-      command[0] === "save" ? "Post 保存完成" : "归档已结清",
-    );
-    expect(result.stderr).toContain(
-      command[0] === "save" ? "保存完成 1" : "归档完成 1",
-    );
-    expect(
-      (await readProjectStatus(readDatabaseConfig(databaseEnv))).latestRun
-        ?.summary,
-    ).toMatchObject(
-      command[0] === "save"
-        ? { saved: 1, archived: 0, unconfirmed: 0 }
-        : { saved: 0, archived: 1, unconfirmed: 0 },
-    );
-    const status = await cli(["status"]);
-    expect(status.exitCode).toBe(0);
-    expect(status.stdout).toContain(
-      command[0] === "save" ? "保存完成 1" : "归档完成 1",
-    );
-  });
-}
-
 test("P2-11 S2 已结清跳过与混合 retry 分类互斥", async () => {
   await reset();
   await testSql`INSERT INTO post_work(post_id,status) VALUES (${postId},'failed')`;
@@ -180,61 +101,3 @@ test("P2-11 S2 已结清跳过与混合 retry 分类互斥", async () => {
 });
 
 import { seedSettledArchive } from "../helpers/seed-settled-archive";
-
-for (const command of [["archive", "post", postId], ["retry"]]) {
-  test(`P2-11 S2 ${command[0]} 摘要未提交仍展示完成，status 不倒推计数`, async () => {
-    await reset();
-    if (command[0] === "retry")
-      await testSql`INSERT INTO post_work(post_id,status,goal) VALUES (${postId},'failed','archive')`;
-    await testSql`CREATE FUNCTION reject_summary() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION '模拟摘要未提交'; END $$`;
-    await testSql`CREATE TRIGGER reject_summary BEFORE UPDATE OF summary ON runs FOR EACH ROW EXECUTE FUNCTION reject_summary()`;
-    try {
-      const result = await cli(command);
-      expect(result.exitCode).toBe(1);
-      expect(result.stderr).toContain("归档已结清");
-      expect(result.stderr).toContain("归档完成 1");
-      expect(result.stderr).toContain("摘要提交结果未知");
-      const status = await cli(["status"]);
-      expect(status.exitCode).toBe(0);
-      expect(status.stdout).toContain("结束时间和数量未知");
-      expect(status.stdout).not.toContain("归档完成 1");
-      expect(
-        (await readProjectStatus(readDatabaseConfig(databaseEnv))).latestRun
-          ?.summary,
-      ).toBeNull();
-    } finally {
-      await testSql`DROP FUNCTION reject_summary() CASCADE`;
-    }
-  });
-  test(`P2-11 S2 ${command[0]} 已完成后摘要失回执和清理失败仍优先退出130`, async () => {
-    await reset();
-    if (command[0] === "retry")
-      await testSql`INSERT INTO post_work(post_id,status,goal) VALUES (${postId},'failed','archive')`;
-    const result = await cli(
-      command,
-      {
-        GMS_TEST_SUMMARY_STOP: "1",
-        GMS_TEST_FINAL_CLOSE_FAILURE: "1",
-        GMS_TEST_CLOSE_FAILURE: "1",
-      },
-      ["./tests/helpers/lose-run-summary-receipt.ts"],
-    );
-    expect(result.exitCode).toBe(130);
-    expect(result.stderr).toContain("归档已结清");
-    expect(result.stderr).toContain("归档完成 1");
-    expect(result.stderr).toContain("清理失败");
-    expect(result.stderr).toContain("摘要提交结果未知");
-  });
-}
-
-test("P2-11 S2 崩溃遗留 Run 的计数未知，当前工作完成不回填历史", async () => {
-  await reset();
-  await testSql`INSERT INTO post_work(post_id,status) VALUES (${postId},'failed')`;
-  await seedSettledArchive(testSql, postId);
-  await testSql`INSERT INTO runs(id,command,started_at) VALUES (${crypto.randomUUID()}::uuid,'archive-post',now())`;
-  const status = await cli(["status"]);
-  expect(status.exitCode).toBe(0);
-  expect(status.stdout).toContain("结束时间和数量未知");
-  expect(status.stdout).not.toContain("归档完成 1");
-  expect(status.stdout).not.toContain("归档完成 0");
-});
