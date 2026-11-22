@@ -7,7 +7,7 @@
 | 层 | 目录 | 收录入口 | 资源边界 |
 | --- | --- | --- | --- |
 | core | `tests/core/` | `just test core`，由 `just gate-core` 收录 | 只用进程内替身，不启动数据库、子进程或真实服务，不占固定端口或共享目录；必须可在多个 worktree 并发运行，秒级完成 |
-| full | `tests/cli/` | `just test tests/cli`，由 `just gate-full` 收录 | 每个测试文件自行启动隔离 Docker PostgreSQL（随机端口，`postgres:18-alpine`），使用临时归档目录和真实 CLI 子进程；浏览器能力一律使用项目接口 fake，见 `tests/helpers/` |
+| full | `tests/cli/` | `just test tests/cli`，由 `just gate-full` 收录 | 一次测试运行共用一个隔离 Docker PostgreSQL 容器（随机端口，`postgres:18-alpine`），每个测试文件在其中新建并最终删除自己的数据库；容器由 `bunfig.toml` 预加载的 `tests/helpers/postgres.ts` 在首次使用时启动、全部文件结束后停止。另使用临时归档目录和真实 CLI 子进程；浏览器能力一律使用项目接口 fake，见 `tests/helpers/` |
 
 两层都不连接 Chrome、Extension 或 Grok。full 层中直接调用 Application 的 S1 测试也放在 `tests/cli/`，因为它们依赖真实 DB 与文件。
 

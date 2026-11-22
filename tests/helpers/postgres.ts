@@ -1,62 +1,29 @@
 import { afterAll, beforeAll } from "bun:test";
 import { SQL } from "bun";
 
+// 一次 bun test 运行共用一个 PostgreSQL 容器，每个测试文件使用自己新建的数据库。
+// 本模块经 bunfig.toml 预加载，底部的 afterAll 因此在全部测试文件结束后执行一次，负责停止容器。
 const password = "isolated-test-password";
-const database = "grok_media_saver_test";
 const username = "postgres";
-let containerId: string | undefined;
 const host = "127.0.0.1";
-let port: number;
 // 容器启动与就绪等待可能超过 bun 默认 5 秒 hook 超时；须高于下方 30 秒就绪期限。
 const hookTimeoutMs = 45_000;
+
+type Server = { containerId: string; port: number; admin: SQL };
+let server: Promise<Server> | undefined;
 
 export let testSql: SQL;
 export let databaseEnv: Record<string, string>;
 
 export function useIsolatedPostgres() {
+  let database: string | undefined;
+
   beforeAll(async () => {
-    const started = await runDocker([
-      "run",
-      "--detach",
-      "--rm",
-      "--name",
-      `gms-db-test-${crypto.randomUUID().slice(0, 8)}`,
-      "--env",
-      `POSTGRES_PASSWORD=${password}`,
-      "--env",
-      `POSTGRES_DB=${database}`,
-      "--publish",
-      "127.0.0.1::5432",
-      "postgres:18-alpine",
-    ]);
-    containerId = started.stdout.trim();
-    const portResult = await runDocker(["port", containerId, "5432/tcp"]);
-    const mapped = portResult.stdout.trim().match(/:(\d+)$/);
-    if (!mapped) throw new Error("Docker 未返回隔离 PostgreSQL 端口。");
-    port = Number(mapped[1]);
-
-    const deadline = Date.now() + 30_000;
-    while (true) {
-      testSql = new SQL({
-        adapter: "postgres",
-        hostname: host,
-        port,
-        username,
-        password,
-        database,
-        connectionTimeout: 1,
-      });
-      try {
-        await testSql`SELECT 1`;
-        break;
-      } catch {
-        await testSql.close({ timeout: 0 }).catch(() => undefined);
-        if (Date.now() > deadline)
-          throw new Error("隔离 PostgreSQL 在 30 秒内未就绪。");
-        await Bun.sleep(250);
-      }
-    }
-
+    server ??= startServer();
+    const { port, admin } = await server;
+    database = `gms_test_${crypto.randomUUID().replaceAll("-", "")}`;
+    await admin.unsafe(`CREATE DATABASE ${database}`);
+    testSql = connect(port, database);
     databaseEnv = {
       PATH: process.env.PATH ?? "",
       GROK_DB_HOST: host,
@@ -68,12 +35,69 @@ export function useIsolatedPostgres() {
   }, hookTimeoutMs);
 
   afterAll(async () => {
-    try {
-      await testSql?.close({ timeout: 5 });
-    } finally {
-      if (containerId) await runDocker(["stop", containerId]);
-    }
+    await testSql?.close({ timeout: 5 });
+    if (database && server)
+      await (await server).admin.unsafe(
+        `DROP DATABASE IF EXISTS ${database} WITH (FORCE)`,
+      );
   }, hookTimeoutMs);
+}
+
+afterAll(async () => {
+  if (!server) return;
+  const started = await server.catch(() => undefined);
+  if (!started) return;
+  try {
+    await started.admin.close({ timeout: 5 });
+  } finally {
+    await runDocker(["stop", started.containerId]);
+  }
+}, hookTimeoutMs);
+
+async function startServer(): Promise<Server> {
+  const started = await runDocker([
+    "run",
+    "--detach",
+    "--rm",
+    "--name",
+    `gms-db-test-${crypto.randomUUID().slice(0, 8)}`,
+    "--env",
+    `POSTGRES_PASSWORD=${password}`,
+    "--publish",
+    "127.0.0.1::5432",
+    "postgres:18-alpine",
+  ]);
+  const containerId = started.stdout.trim();
+  const portResult = await runDocker(["port", containerId, "5432/tcp"]);
+  const mapped = portResult.stdout.trim().match(/:(\d+)$/);
+  if (!mapped) throw new Error("Docker 未返回隔离 PostgreSQL 端口。");
+  const port = Number(mapped[1]);
+
+  const deadline = Date.now() + 30_000;
+  while (true) {
+    const admin = connect(port, "postgres");
+    try {
+      await admin`SELECT 1`;
+      return { containerId, port, admin };
+    } catch {
+      await admin.close({ timeout: 0 }).catch(() => undefined);
+      if (Date.now() > deadline)
+        throw new Error("隔离 PostgreSQL 在 30 秒内未就绪。");
+      await Bun.sleep(250);
+    }
+  }
+}
+
+function connect(port: number, database: string) {
+  return new SQL({
+    adapter: "postgres",
+    hostname: host,
+    port,
+    username,
+    password,
+    database,
+    connectionTimeout: 1,
+  });
 }
 
 async function runDocker(args: string[]) {

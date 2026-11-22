@@ -1,0 +1,3 @@
+[test]
+# 注册全局 afterAll，在整轮测试结束后停止共享的 PostgreSQL 测试容器；未用到数据库时不启动容器。
+preload = ["./tests/helpers/postgres.ts"]
