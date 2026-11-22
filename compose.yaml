@@ -1,0 +1,25 @@
+# 实际归档与现场验收使用的项目 PostgreSQL；自动化测试另起隔离容器，不使用本服务。
+# 连接参数从仓库根目录 .env 的 GROK_DB_* 插值，与 CLI 读取同一份配置。
+name: grok-media-saver
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${GROK_DB_USER:?请在 .env 设置 GROK_DB_USER}
+      POSTGRES_PASSWORD: ${GROK_DB_PASSWORD:?请在 .env 设置非空 GROK_DB_PASSWORD}
+      POSTGRES_DB: ${GROK_DB_NAME:?请在 .env 设置 GROK_DB_NAME}
+    ports:
+      # 只监听本机回环地址。
+      - "127.0.0.1:${GROK_DB_PORT:-5432}:5432"
+    volumes:
+      # PostgreSQL 18 起镜像的数据目录位于 /var/lib/postgresql 之下。
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  pgdata:

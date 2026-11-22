@@ -10,11 +10,10 @@
 
 | 工具或资源 | 用途与准备方式 |
 | --- | --- |
-| mise、just | 安装与运行入口；按 [mise 安装说明](https://mise.jdx.dev/getting-started.html)和 [just 安装说明](https://just.systems/man/en/packages.html)安装，并确保命令在 PATH 中。Bun 由 `just install` 按仓库锁定版本安装。 |
-| PostgreSQL | 实际归档的持久数据库；准备可访问的服务、独立项目数据库及登录用户。安装入口见 [PostgreSQL 下载页](https://www.postgresql.org/download/)。自动化 DB 测试使用 PostgreSQL 18。 |
+| mise、just | 安装与运行入口。mise 由系统安装，见 [mise 安装说明](https://mise.jdx.dev/getting-started.html)；just 由 mise 全局管理（如 `mise use -g just@1`），并确保 mise shim 在 PATH 中。Bun 由 `just install` 按仓库锁定版本安装。 |
 | Chrome、Playwright Extension | 在日常使用的 Chrome profile 中安装 [Playwright Extension](https://chromewebstore.google.com/detail/playwright-extension/mmlmfjhmonkocbjadbfplnigmagldckm)，打开 Chrome 并登录 Grok。 |
 | 本地归档目录 | 存放媒体；使用可写且支持硬链接的文件系统。默认示例为仓库内的 `./archive`。 |
-| Docker（完整门禁需要） | `just gate-full` 使用隔离的 `postgres:18-alpine` 测试容器；日常 CLI 使用你配置的 PostgreSQL 服务。 |
+| Docker（含 Compose） | 系统安装。`just db-up` 用仓库的 `compose.yaml` 启动实际归档与现场验收使用的项目 PostgreSQL（`postgres:18-alpine`）；`just gate-full` 另起隔离的测试容器，两者互不共用。 |
 
 所有下述 shell 命令均在仓库根目录执行。首次使用若 mise 提示配置未受信任，先检查仓库的 `mise.toml`，再执行 `mise trust`。
 
@@ -38,31 +37,18 @@ cp -n .env.example .env
 
 token 获取方式见 [Playwright Extension 官方说明](https://github.com/microsoft/playwright/blob/v1.63.0/packages/extension/README.md#using-your-unique-authentication-token)。本项目直接使用 Extension 连接，无需另行配置或启动 MCP 服务。`.env` 与默认 `archive/` 已被 Git 忽略；真实密码、token 和含 token 的连接页地址不要提交或写入日志。请求间隔与媒体超时可保留 [`.env.example`](.env.example) 中的默认值。
 
-### 3. 准备并初始化项目数据库
+### 3. 启动并初始化项目数据库
 
-`just install` 不启动 PostgreSQL，也不创建数据库。若尚未准备项目数据库，用管理员连接进入 `psql`（替换管理员名、地址和端口）：
-
-```sh
-psql -h 127.0.0.1 -p 5432 -U <管理员用户> -d postgres
-```
-
-在 **psql 内**执行以下首次创建示例；已有项目用户和数据库时跳过创建，核对登录与权限即可：
-
-```sql
-CREATE ROLE grok_media_saver LOGIN;
-\password grok_media_saver
-CREATE DATABASE grok_media_saver OWNER grok_media_saver;
-\q
-```
-
-`\password` 交互式设置非空密码，随后将相同值填写到 `.env`。示例让项目用户拥有独立数据库，以便创建项目表并正常读写；不需要赋予它超级用户权限。数据库创建及密码命令见 [CREATE DATABASE](https://www.postgresql.org/docs/current/sql-createdatabase.html) 和 [psql](https://www.postgresql.org/docs/current/app-psql.html) 官方说明。
-
-配置完成后：
+项目 PostgreSQL 由仓库根目录的 `compose.yaml` 定义，连接参数与 CLI 共用 `.env` 中的 `GROK_DB_*`。`GROK_DB_HOST` 保持 `127.0.0.1`；填写非空 `GROK_DB_PASSWORD` 后执行：
 
 ```sh
-just run db init
+just db-up
 just run status
 ```
+
+`just db-up` 启动容器并等待就绪，随后运行 `db init`，可重复执行。首次启动时容器按 `.env` 创建登录用户与数据库，数据保存在 Docker 数据卷 `grok-media-saver_pgdata` 中；之后修改 `.env` 中的用户、密码或库名不会改动已有数据卷，需自行在库内调整。端口只监听本机回环地址，默认 `5432`，已被占用时改 `GROK_DB_PORT`。
+
+`just db-down` 停止并移除容器，数据卷保留，下次 `just db-up` 继续使用原有数据。数据库事实与归档目录中的文件属于同一组归档事实，不要单独删除数据卷。
 
 `db init` 只检查并创建当前项目 schema，不创建数据库、不清空数据、不启动浏览器。当前结构匹配时可以重复运行；旧 schema 不匹配时保留数据并失败，不自动迁移。新数据库的 `status` 应显示尚无 Run、没有未完成 Post。
 
@@ -153,7 +139,7 @@ just gate-full
 
 `gate-core` 检查 Bun 版本、TypeScript、核心测试和 Biome，不启动外部服务。`gate-full` 再运行真实 CLI 子进程和隔离 Docker PostgreSQL 测试；测试自行准备并清理资源，测试容器不用于日常运行。两者都不连接 Chrome、Extension 或 Grok，也不替代人工验证。
 
-其他入口：`just test` 运行全部 Bun 测试，`just test core` 运行核心测试，`just fmt` 格式化，`just --list` 查看可用命令。
+其他入口：`just test` 运行全部 Bun 测试，`just test core` 运行核心测试，`just fmt` 格式化，`just db-up` / `just db-down` 启动或停止项目 PostgreSQL，`just --list` 查看可用命令。
 
 正式一期现场证据覆盖连接、普通图片、小视频保存和代表性取消清理；真实高清、真实断连与清理故障未完成现场验收。二、三期归档的正式 Chrome/Extension/Grok 现场验收仍待人工执行。历史样本与细节见 [一期验收记录](docs/research/phase1-acceptance.md)和 [二期交付覆盖核对](docs/research/phase2-acceptance.md)。
 

@@ -45,6 +45,15 @@ gate-full:
     just gate-core
     just test tests/cli
 
+# 启动 compose.yaml 中的项目 PostgreSQL 并等待就绪，再初始化当前 schema；可重复运行。
+db-up:
+    docker compose up --detach --wait
+    mise exec -- bun src/cli.ts db init
+
+# 停止并移除项目 PostgreSQL 容器；数据卷保留，下次 db-up 继续使用。
+db-down:
+    docker compose down
+
 env-facts:
     @mise exec -- bun -e 'console.log(JSON.stringify({bun: Bun.version, missing: []}))'
 

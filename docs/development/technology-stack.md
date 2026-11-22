@@ -8,6 +8,7 @@
 - Bun 是应用代码与仓库脚本的宿主运行时，负责依赖、workspaces 与 lockfile；标准安装使用 `bun ci`，默认 bundler 为 `Bun.build`，默认 test runner 为 `bun test`。
 - Biome 负责格式化、lint 与 import 排序，以 recommended 规则起步；TypeScript 的 `tsc --noEmit` 是权威 typecheck。优先使用 Bun / Biome 已有能力，新增依赖须解决当前需求。
 - just 是 agent 工作流命令接口，保留 `install`、`test [ARGS...]`、`gate-core`、`gate-full` 必需入口。安装须根据锁定配置准备相同环境；工具或依赖准备失败返回非零。
+- Docker（含 Compose）由系统安装，不经 mise 管理。根目录 `compose.yaml` 定义实际归档与现场验收使用的项目 PostgreSQL，由 `just db-up` / `just db-down` 启停；`gate-full` 的隔离测试容器由测试代码自行启动，不使用 compose。两者都使用 `postgres:18-alpine`，升级 PostgreSQL 大版本时一并调整。
 
 ## 版本与升级政策
 
