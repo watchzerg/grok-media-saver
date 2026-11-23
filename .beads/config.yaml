@@ -73,5 +73,7 @@
 
 sync:
     remote: "git+https://github.com/watchzerg/grok-media-saver.git"
+dolt:
+    auto-push: true
 
-# remote: "git+ssh://git@github.com/watchzerg/grok-media-saver.git"
+# remote: "git+https://github.com/watchzerg/grok-media-saver.git"
