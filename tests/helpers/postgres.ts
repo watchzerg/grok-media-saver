@@ -3,9 +3,11 @@ import { SQL } from "bun";
 
 // 一次 bun test 运行共用一个 PostgreSQL 容器，每个测试文件使用自己新建的数据库。
 // 本模块经 bunfig.toml 预加载，底部的 afterAll 因此在全部测试文件结束后执行一次，负责停止容器。
-const password = "isolated-test-password";
-const username = "postgres";
-const host = "127.0.0.1";
+// 容器参数由 mise.toml [tasks.test-full.env] 管理，此处保留同值默认值。
+const password = process.env.GMS_TEST_PG_PASSWORD ?? "isolated-test-password";
+const username = process.env.GMS_TEST_PG_USER ?? "postgres";
+const host = process.env.GMS_TEST_PG_HOST ?? "127.0.0.1";
+const image = process.env.GMS_TEST_PG_IMAGE ?? "postgres:18-alpine";
 // 容器启动与就绪等待可能超过 bun 默认 5 秒 hook 超时；须高于下方 30 秒就绪期限。
 const hookTimeoutMs = 45_000;
 
@@ -64,8 +66,8 @@ async function startServer(): Promise<Server> {
     "--env",
     `POSTGRES_PASSWORD=${password}`,
     "--publish",
-    "127.0.0.1::5432",
-    "postgres:18-alpine",
+    `${host}::5432`,
+    image,
   ]);
   const containerId = started.stdout.trim();
   const portResult = await runDocker(["port", containerId, "5432/tcp"]);

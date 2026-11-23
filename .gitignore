@@ -4,7 +4,7 @@ node_modules/
 dist/
 /archive/
 .env*
-!.env.example
+mise.local.toml
 
 # Beads / Dolt files (added by bd init)
 .dolt/

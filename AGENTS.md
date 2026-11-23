@@ -6,16 +6,17 @@
 
 ## 开发与验证
 
-- 通过 mise shim 或 `mise exec -- bun …` 使用锁定的 Bun；agent 安装、测试、验证和格式化通过根 `justfile`。
-- 常用入口如下；其他命令查 `just --list`，实际执行范围以 recipe 及其调用代码为准。
+- 由 `mise` 统一管理工具（`mise.toml` `[tools]` + `mise.lock`）、环境变量（`mise.toml` `[env]` + 本机不提交的 `mise.local.toml`）与命令封装（`mise.toml` `[tasks.*]` + `mise-tasks/`）。测试时的环境变量统一由 `mise.toml` 中测试 task 的 `env`（`[tasks.test.env]`、`[tasks.test-full.env]`）管理并隔离开发配置。
+- 常用入口如下；全部任务查 `mise tasks`，实际执行范围以 [mise.toml](mise.toml) 与 `mise-tasks/` 为准。
 
 | 入口 | 用途 |
 | --- | --- |
-| `just install` | 准备锁定环境 |
-| `just test [ARGS...]` | 默认全部测试；`core` 选择核心测试，支持路径和 `-t <name>` 筛选 |
-| `just fmt [files...]` | 格式化与既定安全修复 |
-| `just gate-core` | 静态检查与核心回归 |
-| `just gate-full` | 完整本地门禁，包含真实 CLI/DB 边界 |
+| `mise run install` | 准备锁定环境与依赖 |
+| `mise run test [ARGS...]` | 运行 core 测试（`tests/core`），支持路径和 `-t <name>` 筛选 |
+| `mise run test-full [ARGS...]` | 运行 full 边界测试（`tests/cli`），支持路径和 `-t <name>` 筛选 |
+| `mise run fmt [files...]` | 格式化与既定安全修复 |
+| `mise run gate-core` | 静态检查与核心回归 |
+| `mise run gate-full` | 完整本地门禁，包含真实 CLI/DB 边界 |
 
 - 按改动影响与风险选择最窄有效测试及必要门禁；交付说明验证结果和未验证范围。必需检查失败、收集失败或零匹配不能作为通过证据。
 - `gate-core` 无需外部服务；`gate-full` 包含隔离 Docker PostgreSQL 与真实 CLI 边界测试。自动化门禁不连接 Chrome、Extension 或 Grok，现场验收另行记录。
@@ -33,5 +34,5 @@
 | 设计、修改、排查或 review 产品行为，或查找、维护文档 | [docs/INDEX.md](docs/INDEX.md)：定位并读取适用的现行规格；遵循文档分类与维护规则 |
 | 操作 Beads issue 或 spec | [Beads 约定](docs/agents/issue-tracker.md) |
 | 进行 triage 或调整 triage label | [标签规则](docs/agents/triage-labels.md) |
-| 选库、变更依赖或 lockfile、调整工具链、构建或 just 命令、设计或开发页面 | [技术选型与依赖管理](docs/development/technology-stack.md)：选型与版本政策 |
+| 选库、变更依赖或 lockfile、调整工具链、环境变量、构建或 mise task、设计或开发页面 | [技术选型与依赖管理](docs/development/technology-stack.md)：选型与版本政策 |
 | 编写或修改测试、选择测试模式或验收门禁、定义或核对 seam / Test plan、拆票或调整 Beadwork 计划，或使用 `to-spec`、`to-tickets`、`tdd` | [测试设计与验收](docs/agents/testing.md)：验证选择与共享规则入口 |

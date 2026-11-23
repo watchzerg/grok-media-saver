@@ -324,8 +324,8 @@ S1/S2 已由 `grok-media-saver-we2.9` 最终 Resolution（评论 `dbf33162-ae71-
 
 - 实现票与二期自动化交付不依赖用户 Chrome、Extension、Grok 登录态、私人数据库、真实删除样本、人工操作或现场授权。
 - 锁定 Bun、Docker 等属于测试基础设施要求，不承诺在缺少必要运行工具时也能运行。测试自行准备数据、创建隔离 PostgreSQL 和临时目录、注入故障、验证恢复并清理；不以 mock 冒充真实 DB/文件/进程证据。
-- 每票通过 just test 运行覆盖改动的最窄有效验证，按项目和执行流程完成静态检查及必要门禁；新增可观察行为采用 TDD，行为不变且既有覆盖充分时采用 direct verification。实现票注明行为、适用的 expected red 和具体 Verification。
-- 二期最终干净候选必须通过一次无筛选 just gate-full，并核对矩阵实际覆盖。候选因修复改变后重新运行；不能拼接不同候选的成功片段，失败、收集失败或零匹配不算通过。
+- 每票通过 `mise run test` 或 `mise run test-full` 运行覆盖改动的最窄有效验证，按项目和执行流程完成静态检查及必要门禁；新增可观察行为采用 TDD，行为不变且既有覆盖充分时采用 direct verification。实现票注明行为、适用的 expected red 和具体 Verification。
+- 二期最终干净候选必须通过一次无筛选 `mise run gate-full`，并核对矩阵实际覆盖。候选因修复改变后重新运行；不能拼接不同候选的成功片段，失败、收集失败或零匹配不算通过。
 - 回归覆盖一期保存/发布恢复、版本与文件冲突、共享调度、单页与 retry、Run 级连接复用、逐项工作页关闭和最终断开，以及清理失败不抹去已提交事实。浏览器回归用能力 fake，不因此追加真实环境前置任务。
 
 ### 人工现场验收与三期交接
@@ -341,9 +341,9 @@ S1/S2 已由 `grok-media-saver-we2.9` 最终 Resolution（评论 `dbf33162-ae71-
 
 模块覆盖沿 S1/S2 贯穿 CLI、Application runtime、Post archiver、Grok adapter、共享 scheduler、State store、Archive files 与浏览器能力接入。测试使用当前锁定工具链、隔离 Docker PostgreSQL 与临时归档目录；不访问私人 DB 或既有归档资产。
 
-按实际切片选择 `just test core`、`just test tests/cli/<实际测试文件>` 或带 `-t <name>` 的最窄有效 suite。具体实现票必须填写有效路径、预期行为和验收证据，不将此处占位路径作为可执行命令。新增行为按 TDD，已有充分回归的行为不变改动按 direct verification；遵循[测试设计与验收](../agents/testing.md)及其共享规则。
+按实际切片选择 `mise run test`、`mise run test-full tests/cli/<实际测试文件>` 或带 `-t <name>` 的最窄有效 suite。具体实现票必须填写有效路径、预期行为和验收证据，不将此处占位路径作为可执行命令。新增行为按 TDD，已有充分回归的行为不变改动按 direct verification；遵循[测试设计与验收](../agents/testing.md)及其共享规则。
 
-当前 `just gate-core` 包含 Bun 版本检查、TypeScript、核心测试和 Biome CI；`just gate-full` 再运行真实 CLI/DB 边界测试。最终候选需通过无筛选 `just gate-full` 并核对上述矩阵覆盖；仅命令成功不证明未覆盖的行为。收集失败、零匹配或缺失环境不能作为通过证据。
+当前 `mise run gate-core` 包含 Bun 版本检查、Biome CI、TypeScript 和核心测试；`mise run gate-full` 再运行真实 CLI/DB 边界测试。最终候选需通过无筛选 `mise run gate-full` 并核对上述矩阵覆盖；仅命令成功不证明未覆盖的行为。收集失败、零匹配或缺失环境不能作为通过证据。
 
 正式现场验收留给实现交付后由用户执行。交付时结合届时实际 CLI 给出简短清单：
 

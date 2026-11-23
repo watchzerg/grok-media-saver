@@ -4,10 +4,10 @@
 
 ## 准备
 
-1. 按 [README 快速开始](../../README.md#快速开始)准备前置工具并运行 `just install`。当前直接运行源码 CLI，无需构建，也没有常驻服务。自动化检查可运行 `just gate-core`；完整门禁 `just gate-full` 使用隔离 Docker PostgreSQL、临时目录和真实 CLI 子进程，宿主需要能运行 Docker 并取得 `postgres:18-alpine` 镜像。门禁不连接 Chrome 或 Grok，测试容器不用于实际归档。
-2. 复制 `.env.example` 为 `.env`，填入 `GROK_DB_*`、`GROK_ARCHIVE_DIR`。实际归档与现场验收使用 `compose.yaml` 定义的项目 PostgreSQL，与测试容器相互独立。环境变量优先于 `.env`。数据库密码、Extension token 和含 token 的连接页地址不进入提交、终端记录或验收材料。
+1. 按 [README 快速开始](../../README.md#快速开始)准备前置工具并运行 `mise run install`。当前直接运行源码 CLI，无需构建，也没有常驻服务。自动化检查可运行 `mise run gate-core`；完整门禁 `mise run gate-full` 使用隔离 Docker PostgreSQL、临时目录和真实 CLI 子进程，宿主需要能运行 Docker 并取得 `postgres:18-alpine` 镜像。门禁不连接 Chrome 或 Grok，测试容器不用于实际归档。
+2. 复制 `mise.local.toml.example` 为 `mise.local.toml`，填入 `GROK_DB_PASSWORD` 与 `PLAYWRIGHT_MCP_EXTENSION_TOKEN`，按需覆盖 `mise.toml` `[env]` 中的 `GROK_DB_*` 或 `GROK_ARCHIVE_DIR`。实际归档与现场验收使用 `compose.yaml` 定义的项目 PostgreSQL，与测试容器相互独立。配置优先级为 `mise.local.toml` > `mise.toml` `[env]` > 程序默认值。数据库密码、Extension token 和含 token 的连接页地址不进入提交、终端记录或验收材料。
 3. 在主 Chrome 的登录配置中保持 Grok 登录，并安装 Playwright Extension。为需要浏览器的命令提供 `PLAYWRIGHT_MCP_EXTENSION_TOKEN`。程序只附着既有 Chrome context，按需建立一次连接并关闭自己的工作页；批量 Run 在各 Post 间复用连接。收尾时关闭能用本次随机标记唯一确认的 `connect.html`，归属不明或旧运行遗留的连接页仍保留并提示人工核对，用户原有标签页由用户管理。
-4. 运行 `just db-up`：启动项目 PostgreSQL 并等待就绪，再执行 `db init`。`db init` 只初始化当前 schema，不创建数据库；普通命令只读核对 schema，不自动迁移。`just db-down` 停止容器并保留数据卷。改动归档根目录后，`verify` 只查新目录。
+4. 运行 `mise run db-up`：启动项目 PostgreSQL 并等待就绪，再执行 `db init`。`db init` 只初始化当前 schema，不创建数据库；普通命令只读核对 schema，不自动迁移。`mise run db-down` 停止容器并保留数据卷。改动归档根目录后，`verify` 只查新目录。
 
 ## 运行顺序
 
@@ -23,7 +23,7 @@
 | `verify <Post-ID>` | 只读检查当前归档目录中的已保存文件大小与 SHA-256，不改变 DB 或文件。 |
 | `retry` | 新建 Run，固定启动时纯保存目标的 `pending`、`finalizing`、`failed` 及未结清 `archive` 集合；按各自 save/archive 目标逐项接续同一保存或归档路径，每项一轮，已结清不入选；空集合只需 DB，有目标时还需归档目录与 Chrome/Extension。 |
 
-所有命令在仓库根目录用 `just run <命令>` 执行；参数原样传给 CLI，退出码和 Ctrl+C 由前台应用处理。退出码为 `0` 成功、`1` 执行或核验失败、`2` 参数或配置错误、`130` 首次 Ctrl+C 停止。单 Post、`save first-page` 和 `retry` 的五类摘要按[二期规格](../specs/phase2-archiving.md#单-post-与-retry-的-run-摘要)统一表达；本次已知计数与摘要是否持久记录分别展示。`status` 只读取持久摘要，未收尾或缺失摘要的数量未知。普通单 Post 失败可继续后项；登录/challenge、429、停止、丢锁和基础资源故障会结束本次调度。
+所有命令在仓库根目录用 `mise run cli <命令>` 执行；参数原样传给 CLI，退出码和 Ctrl+C 由前台应用处理。退出码为 `0` 成功、`1` 执行或核验失败、`2` 参数或配置错误、`130` 首次 Ctrl+C 停止。单 Post、`save first-page` 和 `retry` 的五类摘要按[二期规格](../specs/phase2-archiving.md#单-post-与-retry-的-run-摘要)统一表达；本次已知计数与摘要是否持久记录分别展示。`status` 只读取持久摘要，未收尾或缺失摘要的数量未知。普通单 Post 失败可继续后项；登录/challenge、429、停止、丢锁和基础资源故障会结束本次调度。
 
 当前 schema 明确保存 `goal`、`archive_settled`、移除状态和删除依据版本绑定；旧结构不匹配时保留数据并失败，不自动迁移或清空。保存入口拒绝接管未结清 `archive` 工作；单页继续其余成员，整体非零。已结清工作直接跳过，不读取文件或详情。常用命令见 [README 人工验证与日常使用](../../README.md#人工验证与日常使用)；精确目标、核验、未知结果与恢复契约以[二期规格](../specs/phase2-archiving.md#入口与工作目标)为准。待核对意图再次执行 `archive post` 或 `retry` 时先发精确 GET；认可不存在后先持久记录移除，再核验原绑定文件，正确才结清。缺失或冲突保留已移除与未结清，恢复正确文件后再次调用可仅本地核验结清。认可仍存在后先结清旧意图和绑定，确定提交后重新读取详情，符合资格后本 Run 最多一次新 DELETE。本次 DELETE 未知时有限核对；两阶段各最多两次 GET，仅已确认结束的网络错误、超时、408 或 5xx 条件重试一次，沿用共享许可与 30 秒期限。已移除但文件缺失时，仅按原来源补救绑定版本，不重新选择详情或 DELETE。`retry` 按启动时固定的目标集合复用同一接续路径，每项一轮；请求预算按 Post 保留在本 Run 内，所有请求共用调度许可。断连、丢锁、提交不确定、请求停止不确定或清理失败会停止后续项目并保留未开始工作。只保存入口不发 DELETE，`archive` 工作不会被降为 `save`。
 
@@ -41,7 +41,7 @@ Grok 的 PNG 声明、JPEG 内容这一已知错标在完整性核验通过后�
 
 ## 批量归档和显式恢复
 
-运行 `just run archive saved`。合法非空页计处理轮次；合法空页不计轮，最后一轮是否处理完单列。发现零项和读页失败不证明列表为空。完成须同时具备合法空页、所有 save/archive 工作完成及正常收尾；空页遗留、No Progress、阻挡、故障、记账未知或清理失败退出 `1`。
+运行 `mise run cli archive saved`。合法非空页计处理轮次；合法空页不计轮，最后一轮是否处理完单列。发现零项和读页失败不证明列表为空。完成须同时具备合法空页、所有 save/archive 工作完成及正常收尾；空页遗留、No Progress、阻挡、故障、记账未知或清理失败退出 `1`。
 
 - 已开始未完成：先查 `status`、处理原因，再运行 `retry`；纯 save 目标不会被升级为删除工作。
 - 已发现尚未开始：未预建工作，不保证进入 retry；重新运行 `archive saved` 发现。
@@ -64,6 +64,6 @@ Grok 的 PNG 声明、JPEG 内容这一已知错标在完整性核验通过后�
 
 ## 验收边界
 
-`just gate-full` 证明当前代码的 core、真实本地 DB/文件/CLI 进程测试通过，不证明当前 Chrome 登录态、Grok 响应或断电级恢复。正式图片、小视频和取消清理的现场结果记录在[一期验收记录](../research/phase1-acceptance.md)。真实高清无可用样本；大视频专项不在一期范围。
+`mise run gate-full` 证明当前代码的 core、真实本地 DB/文件/CLI 进程测试通过，不证明当前 Chrome 登录态、Grok 响应或断电级恢复。正式图片、小视频和取消清理的现场结果记录在[一期验收记录](../research/phase1-acceptance.md)。真实高清无可用样本；大视频专项不在一期范围。
 
 二期完整自动化覆盖与未验证边界见[二期交付覆盖核对](../research/phase2-acceptance.md)。正式现场归档验收尚未执行，由用户在选定并授权精确样本后另行操作；自动化门禁不连接 Chrome、Extension 或 Grok，也不执行真实 DELETE。

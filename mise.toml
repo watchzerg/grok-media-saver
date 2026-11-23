@@ -1,3 +1,117 @@
+# 项目工具链、环境变量与命令契约；所有任务通过 `mise run <task>` 执行，`mise tasks` 查看。
+# 非敏感默认配置在 [env] 中维护；本机凭据与个人覆盖写到不提交的 mise.local.toml（模板见 mise.local.toml.example）。
+# 测试 task 的 [tasks.*.env] 会清除开发环境变量与本机凭据，避免测试受本地配置污染。
+
 # Bun 的兼容版本 line；精确构建由 mise.lock 记录。
 [tools]
 bun = "1.4"
+
+[env]
+# 项目 PostgreSQL；mise run db-up 按这些值用 compose.yaml 启动容器并运行 db init。
+# 非空密码 GROK_DB_PASSWORD 与 PLAYWRIGHT_MCP_EXTENSION_TOKEN 写入不提交的 mise.local.toml。
+GROK_DB_HOST = "127.0.0.1"
+GROK_DB_PORT = "5432"
+GROK_DB_USER = "grok_media_saver"
+GROK_DB_NAME = "grok_media_saver"
+
+# verify 与保存命令使用的当前归档根目录。
+GROK_ARCHIVE_DIR = "./archive"
+
+# 本命令唯一支持的列表入口。
+GROK_SAVED_LIST_URL = "https://grok.com/imagine/saved"
+
+# 请求间隔上下限，单位为秒。
+GROK_API_INTERVAL_MIN_SECONDS = "5"
+GROK_API_INTERVAL_MAX_SECONDS = "8"
+
+# 媒体单次传输超时，单位为秒。
+GROK_MEDIA_FIRST_BYTE_TIMEOUT_SECONDS = "30"
+GROK_MEDIA_NO_PROGRESS_TIMEOUT_SECONDS = "30"
+GROK_MEDIA_TOTAL_TIMEOUT_SECONDS = "900"
+
+[tasks.check-toolchain]
+description = "核对当前 Bun 版本符合 mise.toml 声明的版本 line，不同步依赖"
+run = "bun scripts/assert-bun-runtime.mjs"
+
+[tasks.install]
+description = "按 bun.lock 安装依赖；Bun 由 mise 按 mise.lock 提供"
+run = "bun ci"
+
+[tasks.cli]
+description = "在前台运行源码 CLI，原样转发参数、信号与退出码"
+raw = true
+quiet = true
+file = "mise-tasks/cli"
+
+[tasks.fmt]
+description = "Biome 格式化并修复可自动修复的 lint；默认当前仓库，可传路径"
+file = "mise-tasks/fmt"
+
+[tasks.lint]
+description = "Biome 静态检查，不修改源码"
+run = "bun run biome ci"
+
+[tasks.typecheck]
+description = "TypeScript 类型检查，不修改源码"
+run = "bun run tsc --noEmit"
+
+[tasks.test]
+description = "运行 core 测试（tests/core）；可传路径或 -t <name> 定向"
+file = "mise-tasks/test"
+
+[tasks.test.env]
+# 隔离开发环境变量与本机凭据，避免测试读取本地配置。
+PLAYWRIGHT_MCP_EXTENSION_TOKEN = false
+GROK_DB_HOST = false
+GROK_DB_PORT = false
+GROK_DB_USER = false
+GROK_DB_PASSWORD = false
+GROK_DB_NAME = false
+GROK_ARCHIVE_DIR = false
+GROK_SAVED_LIST_URL = false
+GROK_API_INTERVAL_MIN_SECONDS = false
+GROK_API_INTERVAL_MAX_SECONDS = false
+GROK_MEDIA_FIRST_BYTE_TIMEOUT_SECONDS = false
+GROK_MEDIA_NO_PROGRESS_TIMEOUT_SECONDS = false
+GROK_MEDIA_TOTAL_TIMEOUT_SECONDS = false
+
+[tasks.test-full]
+description = "运行 full 边界测试（tests/cli，含隔离 Docker PostgreSQL）；可传路径或 -t <name> 定向"
+file = "mise-tasks/test-full"
+
+[tasks.test-full.env]
+# 隔离开发环境变量与本机凭据，并声明隔离测试容器配置。
+PLAYWRIGHT_MCP_EXTENSION_TOKEN = false
+GROK_DB_HOST = false
+GROK_DB_PORT = false
+GROK_DB_USER = false
+GROK_DB_PASSWORD = false
+GROK_DB_NAME = false
+GROK_ARCHIVE_DIR = false
+GROK_SAVED_LIST_URL = false
+GROK_API_INTERVAL_MIN_SECONDS = false
+GROK_API_INTERVAL_MAX_SECONDS = false
+GROK_MEDIA_FIRST_BYTE_TIMEOUT_SECONDS = false
+GROK_MEDIA_NO_PROGRESS_TIMEOUT_SECONDS = false
+GROK_MEDIA_TOTAL_TIMEOUT_SECONDS = false
+GMS_TEST_PG_HOST = "127.0.0.1"
+GMS_TEST_PG_USER = "postgres"
+GMS_TEST_PG_PASSWORD = "isolated-test-password"
+GMS_TEST_PG_IMAGE = "postgres:18-alpine"
+
+[tasks.gate-core]
+description = "静态检查与核心回归（并行执行，无需外部服务）"
+depends = ["check-toolchain", "lint", "typecheck", "test"]
+
+[tasks.gate-full]
+description = "完整本地门禁：gate-core 通过后运行真实 CLI/隔离 DB 边界测试"
+depends = ["gate-core"]
+run = [{ task = "test-full" }]
+
+[tasks.db-up]
+description = "启动 compose.yaml 中的项目 PostgreSQL 并等待就绪，再初始化当前 schema；可重复运行"
+run = ["docker compose up --detach --wait", "bun src/cli.ts db init"]
+
+[tasks.db-down]
+description = "停止并移除项目 PostgreSQL 容器；数据卷保留，下次 db-up 继续使用"
+run = "docker compose down"

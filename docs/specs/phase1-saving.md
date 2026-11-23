@@ -35,7 +35,7 @@ Post ID 只接受带连字符的 `8-4-4-4-12` 位十六进制 UUID：去首尾�
 
 ## 配置与初始化
 
-提供 `.env.example` 占位示例，本机 `.env` 保存实际值。优先级为进程环境变量 > env 文件 > 程序默认值；配置在本进程内固定。按用例仅校验所需配置，错误中隐藏密码、token 及含 token 的连接 URL。
+由 `mise.toml` `[env]` 提供非敏感默认配置，`mise.local.toml`（模板见 `mise.local.toml.example`）保存本机凭据与覆盖。优先级为 `mise.local.toml` > `mise.toml` `[env]` > 程序默认值（直接传给进程的环境变量按实际进程环境读取）；配置在本进程内固定。按用例仅校验所需配置，错误中隐藏密码、token 及含 token 的连接 URL。
 
 配置包含拆分的 DB 地址、端口、用户名、密码、数据库名，归档根目录，列表起点 URL，Playwright Extension 连接 token，共享间隔上下限及媒体超时。列表默认 `https://grok.com/imagine/saved`，保持唯一 Saved 来源，不扩展任意抓取。token 是扩展连接凭据，不是 Grok API key。
 
@@ -170,7 +170,7 @@ Run controller 选择并串行安排目标，所有保存入口复用 Post archi
 - **不可观察：** 已登录 Chrome/Grok 的现场连接、真实响应、浏览器网络取消或真实页面清理。
 - **Prior art:** 暂无正式 CLI 测试。
 
-不模拟整棵 Playwright 对象树，不增加测试专用业务 API。可在已批准观察范围内增补 fixture 和代表性场景；改变接口、改测内部实现或削弱观察能力须重新确认。每张实施票按共享测试契约选择 TDD 或 direct verification，写明行为、预期 red（适用时）和具体 just 验证。
+不模拟整棵 Playwright 对象树，不增加测试专用业务 API。可在已批准观察范围内增补 fixture 和代表性场景；改变接口、改测内部实现或削弱观察能力须重新确认。每张实施票按共享测试契约选择 TDD 或 direct verification，写明行为、预期 red（适用时）和具体 mise task 验证。
 
 ### 自动化验收矩阵
 
@@ -187,7 +187,7 @@ Run controller 选择并串行安排目标，所有保存入口复用 Post archi
 
 采用少量代表性场景及必要故障点，不穷举交叉组合。该矩阵是本期交付时的验收范围；当前持续维护的回归范围见[测试分层与保留范围](../development/test-layers.md)。DB 使用隔离 Docker PostgreSQL，文件使用临时目录，进程行为使用真实子进程。浏览器相关自动化仅采用方案 A；不建设真实 Chrome + Extension + 本地受控服务的方案 B，也不将其列为延期必补项。
 
-`just gate-core` 在静态检查上运行无需外部服务的快速核心测试；`just gate-full` 再包含真实 DB、文件与 CLI 边界测试。两者均不需要 Chrome、Extension token 或 Grok 登录态。按改动影响选择测试与必要门禁，具体遵循[测试设计与验收](../agents/testing.md)；本节继续定义一期行为覆盖和现场验收要求。
+`mise run gate-core` 在静态检查上运行无需外部服务的快速核心测试；`mise run gate-full` 再包含真实 DB、文件与 CLI 边界测试。两者均不需要 Chrome、Extension token 或 Grok 登录态。按改动影响选择测试与必要门禁，具体遵循[测试设计与验收](../agents/testing.md)；本节继续定义一期行为覆盖和现场验收要求。
 
 ### 现场验收与交付阻断
 

@@ -42,7 +42,7 @@
 - [一期可靠保存规格](specs/phase1-saving.md)维护一期行为、持久事实、恢复及 Testing Decisions；Beads 决策票保留过程与确认记录，后续实现票引用规格。
 - [二期单 Post 完整归档规格](specs/phase2-archiving.md)维护归档目标、删除资格与判据、持久删除事实、恢复及二期 Testing Decisions；对一期明确扩展的行为以二期为准，未变更的保存契约继续引用一期。`grok-media-saver-we2` 保留决策来源，详细契约由二期规格承接。
 - [三期批量归档规格](specs/phase3-batch-archiving.md)维护 `archive saved` 连续第一页调度、新确认移除、去重与预算、等待和结束条件、批量摘要及三期 Testing Decisions。设计、修改或验证这些行为时必须读取；单 Post 保存、删除与恢复继续引用一二期。`grok-media-saver-ozd` 保留决策来源，规格确认不表示入口已实现。
-- [技术选型与依赖管理](development/technology-stack.md)维护工具和依赖政策；当前版本以配置与 lockfile 为准。根 [justfile](../justfile)及其调用代码定义实际命令行为。
+- [技术选型与依赖管理](development/technology-stack.md)维护工具和依赖政策；当前版本以配置与 lockfile 为准。根 [mise.toml](../mise.toml) 与 `mise-tasks/` 定义工具、环境变量及实际命令行为。
 - [测试设计与验收](agents/testing.md)维护按改动选择验证的规则及共享流程入口；具体规格维护行为覆盖、approved seams 和现场验收要求。
 - `research/` 记录观察和证据；研究建议本身不构成产品合同。
 - [README.md](../README.md) 是使用入口；安装、配置和运行步骤应以实际可执行的项目状态为准。

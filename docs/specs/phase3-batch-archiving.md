@@ -217,8 +217,8 @@ status 只读 DB，展示最近 Run 的持久历史摘要与本次查询的当�
 ### 验证与自动化交付条件
 
 - 新增可观察行为采用 TDD；行为不变且回归充分时采用 direct verification，说明理由。实现票须写明 S1/S2、行为、适用的 expected red 及具体有效 Verification；本规格的预期行为不是实测证据。
-- 通过根 justfile 和锁定 Bun 运行最窄有效测试；当前可复用的入口包括 `just test tests/cli/archive-post.test.ts`、`just test tests/cli/save-first-page.test.ts`、`just test tests/cli/retry.test.ts`、`just test tests/cli/run-summary.test.ts`。这些现有 suite 提供回归基础，新增批量行为必须补充实际覆盖，后续实现票按实际测试路径填写命令，不能以零匹配或占位路径验收。
-- 按[测试设计与验收](../agents/testing.md)及执行流程完成每票静态检查和交付 `gate-core`。最终在干净候选上执行一次无筛选 `just gate-full`，并逐项核对矩阵的实际证据；行为、测试或配置修复改变候选后重新完整运行，不拼接不同候选的成功片段。纯文档收尾按现行 document-closeout 规则处理。
+- 通过根 `mise.toml` / `mise-tasks/` 和锁定 Bun 运行最窄有效测试；当前可复用的入口包括 `mise run test-full tests/cli/archive-post.test.ts`、`mise run test-full tests/cli/save-first-page.test.ts`、`mise run test-full tests/cli/retry.test.ts`、`mise run test-full tests/cli/run-summary.test.ts`。这些现有 suite 提供回归基础，新增批量行为必须补充实际覆盖，后续实现票按实际测试路径填写命令，不能以零匹配或占位路径验收。
+- 按[测试设计与验收](../agents/testing.md)及执行流程完成每票静态检查和交付 `gate-core`。最终在干净候选上执行一次无筛选 `mise run gate-full`，并逐项核对矩阵的实际证据；行为、测试或配置修复改变候选后重新完整运行，不拼接不同候选的成功片段。纯文档收尾按现行 document-closeout 规则处理。
 - 当前 `gate-core` 包含锁定工具链、TypeScript、核心测试与 Biome；`gate-full` 再运行真实 CLI/DB/文件/进程边界测试。失败、收集失败、零匹配或环境缺失均不算通过。
 - 锁定 Bun、Docker 和 PostgreSQL 测试镜像属于必要基础设施。自动化实施、受控故障验证和修复不依赖用户 Chrome、Extension、Grok 登录态、私人 DB、真实 DELETE 样本或中途人工操作。
 

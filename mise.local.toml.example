@@ -1,0 +1,9 @@
+# 复制为 mise.local.toml 并填写本机私有值；mise.local.toml 已被 Git 忽略，勿提交真实密码或 token。
+# 如需覆盖 mise.toml 中的默认项（例如 GROK_DB_PORT、GROK_ARCHIVE_DIR），在此添加同名键即可。
+
+[env]
+# Playwright Extension 连接凭据；点击已登录 Grok 的 Chrome 中的扩展图标，在扩展界面／状态页复制。
+PLAYWRIGHT_MCP_EXTENSION_TOKEN = ""
+
+# 项目 PostgreSQL 非空密码；mise run db-up 与 CLI 共用此值。
+GROK_DB_PASSWORD = ""

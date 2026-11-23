@@ -1,14 +1,14 @@
 # 实际归档与现场验收使用的项目 PostgreSQL；自动化测试另起隔离容器，不使用本服务。
-# 连接参数从仓库根目录 .env 的 GROK_DB_* 插值，与 CLI 读取同一份配置。
+# 连接参数由 mise.toml [env] 与 mise.local.toml 提供，经 mise run db-up 注入并与 CLI 共用。
 name: grok-media-saver
 
 services:
   postgres:
     image: postgres:18-alpine
     environment:
-      POSTGRES_USER: ${GROK_DB_USER:?请在 .env 设置 GROK_DB_USER}
-      POSTGRES_PASSWORD: ${GROK_DB_PASSWORD:?请在 .env 设置非空 GROK_DB_PASSWORD}
-      POSTGRES_DB: ${GROK_DB_NAME:?请在 .env 设置 GROK_DB_NAME}
+      POSTGRES_USER: ${GROK_DB_USER:?请在 mise.toml 或 mise.local.toml 设置 GROK_DB_USER}
+      POSTGRES_PASSWORD: ${GROK_DB_PASSWORD:?请在 mise.local.toml 设置非空 GROK_DB_PASSWORD}
+      POSTGRES_DB: ${GROK_DB_NAME:?请在 mise.toml 或 mise.local.toml 设置 GROK_DB_NAME}
     ports:
       # 只监听本机回环地址。
       - "127.0.0.1:${GROK_DB_PORT:-5432}:5432"

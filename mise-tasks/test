@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+has_target=false
+skip_next=false
+for arg in "$@"; do
+  if $skip_next; then
+    skip_next=false
+    continue
+  fi
+  case "$arg" in
+    -t|--test-name-pattern|--timeout|--preload|--rerun-each|--bail|--concurrency|--max-concurrency|--reporter|--reporter-outfile|--coverage-reporter|--coverage-dir)
+      skip_next=true
+      ;;
+    -*)
+      ;;
+    *)
+      has_target=true
+      break
+      ;;
+  esac
+done
+if $has_target; then
+  exec bun test "$@"
+fi
+exec bun test ./tests/core "$@"

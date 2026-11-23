@@ -1,13 +1,13 @@
 # 测试分层与保留范围
 
-本文维护自动化测试的分层、收录入口和当前保留范围。按改动选择验证的规则见[测试设计与验收](../agents/testing.md)，各期行为与现场验收要求见对应[规格](../INDEX.md#权威来源与适用范围)，实际执行范围以根 [justfile](../../justfile) 为准。
+本文维护自动化测试的分层、收录入口和当前保留范围。按改动选择验证的规则见[测试设计与验收](../agents/testing.md)，各期行为与现场验收要求见对应[规格](../INDEX.md#权威来源与适用范围)，实际执行范围以根 [mise.toml](../../mise.toml) 与 `mise-tasks/` 为准。
 
 ## 分层合同
 
 | 层 | 目录 | 收录入口 | 资源边界 |
 | --- | --- | --- | --- |
-| core | `tests/core/` | `just test core`，由 `just gate-core` 收录 | 只用进程内替身，不启动数据库、子进程或真实服务，不占固定端口或共享目录；必须可在多个 worktree 并发运行，秒级完成 |
-| full | `tests/cli/` | `just test tests/cli`，由 `just gate-full` 收录 | 一次测试运行共用一个隔离 Docker PostgreSQL 容器（随机端口，`postgres:18-alpine`），每个测试文件在其中新建并最终删除自己的数据库；容器由 `bunfig.toml` 预加载的 `tests/helpers/postgres.ts` 在首次使用时启动、全部文件结束后停止。另使用临时归档目录和真实 CLI 子进程；浏览器能力一律使用项目接口 fake，见 `tests/helpers/` |
+| core | `tests/core/` | `mise run test`，由 `mise run gate-core` 收录 | 只用进程内替身，不启动数据库、子进程或真实服务，不占固定端口或共享目录；`[tasks.test.env]` 隔离开发环境变量与本机凭据；必须可在多个 worktree 并发运行，秒级完成 |
+| full | `tests/cli/` | `mise run test-full`，由 `mise run gate-full` 收录 | 一次测试运行共用一个隔离 Docker PostgreSQL 容器（随机端口，镜像与连接参数由 `[tasks.test-full.env]` 管理，默认 `postgres:18-alpine`），每个测试文件在其中新建并最终删除自己的数据库；容器由 `bunfig.toml` 预加载的 `tests/helpers/postgres.ts` 在首次使用时启动、全部文件结束后停止。`[tasks.test-full.env]` 同时隔离开发环境变量与本机凭据。另使用临时归档目录和真实 CLI 子进程；浏览器能力一律使用项目接口 fake，见 `tests/helpers/` |
 
 两层都不连接 Chrome、Extension 或 Grok。full 层中直接调用 Application 的 S1 测试也放在 `tests/cli/`，因为它们依赖真实 DB 与文件。
 
