@@ -25,7 +25,7 @@
 
 开始任何任务前，必须读取 [ARCHITECTURE.md](ARCHITECTURE.md)，建立对模块职责和架构约束的共同理解；其中链接的详细资料按当前任务需要展开。
 
-下表是必读路由：开始对应工作前必须读取并遵守目标文档。命中多项时读取全部相关入口；入口要求继续读取的规格或共享规则也须按条件展开，不能只读索引。已在本次任务读取且未变化的内容无需重复加载。
+下表是必读路由：开始对应工作前必须读取并遵守目标文档。命中多项时读取全部相关入口；入口要求继续读取的规格也须按条件展开，不能只读索引。已在本次任务读取且未变化的内容无需重复加载。
 
 | 任务 | 入口与用途 |
 | --- | --- |
@@ -35,4 +35,4 @@
 | 操作 Beads issue 或 spec | [Beads 约定](docs/agents/issue-tracker.md) |
 | 进行 triage 或调整 triage label | [标签规则](docs/agents/triage-labels.md) |
 | 选库、变更依赖或 lockfile、调整工具链、环境变量、构建或 mise task、设计或开发页面 | [技术选型与依赖管理](docs/development/technology-stack.md)：选型与版本政策 |
-| 编写或修改测试、选择测试模式或验收门禁、定义或核对 seam / Test plan、拆票或调整 Beadwork 计划，或使用 `to-spec`、`to-tickets`、`tdd` | [测试设计与验收](docs/agents/testing.md)：验证选择与共享规则入口 |
+| 编写或修改测试、选择测试模式或验收门禁，或定义与核对 seam / Test plan | [测试设计与验收](docs/agents/testing.md)：验证选择与验收来源 |
